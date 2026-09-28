@@ -4,8 +4,8 @@
 // never sees the sale. So the authorization pins a vault the program owns — the wCOOK associated
 // account of PDA `["curve_sell", pool, maker]` — and the program's `settle_curve_sell` pays it out:
 // `Fee.maker_fee` to the fee vault, the rest to the maker's WALLET as native COOK, unwrapped through
-// a scratch `["payout", vault]` account the program creates and closes inside the instruction
-// (fibanachos/limit-order#2). The maker needs no token account.
+// a scratch `["payout", vault]` account the program creates and closes inside the instruction.
+// The maker needs no token account.
 // The floor therefore applies to what reaches the vault, BEFORE the fee, exactly like a plain
 // order's `taking_amount`: priced at P, the order fills once the curve pays P and the maker nets
 // P minus the fee. The keeper refuses an authorization signed after the switch that pins anything

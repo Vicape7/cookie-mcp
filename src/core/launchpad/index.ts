@@ -178,7 +178,7 @@ export function anchorLogSummary(e: AnchorLogError): string {
  * `logs.slice(-3)` looks reasonable and is actively misleading: for a constraint violation Anchor's
  * last three lines are `Right:`, a bare pubkey, and `Program … failed: custom program error: 0x…`, so
  * the `AnchorError` line naming the account and the error is cut off, and what surfaces is a pubkey
- * that changes every build and reads as noise. That is what turned momoswap-backend#113 into a
+ * that changes every build and reads as noise. That is what once turned a launch failure into a
  * brute-force seed hunt (each rebuild leasing a rate-limited vanity mint) rather than a one-run
  * diagnosis. So: start the window at the first line that explains something and keep going.
  */

@@ -44,6 +44,7 @@ import { noRouteError } from "./launchpad";
 import { userPositionPda } from "./launchpad/positions";
 import { getConnection } from "./rpc";
 import { resolveMeta, type TokenMeta } from "./trade";
+import { fetchMintPrograms, harvestIxMatcher, mintProgramOf } from "./transferFee";
 import {
   assertHousekeepingIxs,
   decodeMessageIxs,
@@ -255,6 +256,17 @@ export interface ExpectedPlace {
   payoutNative: boolean;
   /** The order address the API reported. */
   order: PublicKey;
+  /**
+   * Token programs owning the two mints (default: classic SPL). A Token-2022 mint's ATA lives under
+   * Token-2022, so deriving it under the classic program would refuse every such build.
+   */
+  inputTokenProgram?: PublicKey;
+  outputTokenProgram?: PublicKey;
+  /**
+   * The input mint carries a transfer fee: the build may harvest the tax withheld on OUR reserve
+   * into the mint (Token-2022 will not close the reserve otherwise) — that one instruction only.
+   */
+  inputTaxed?: boolean;
 }
 
 /**
@@ -321,8 +333,18 @@ export function assertPlaceTxTrustworthy(tx: VersionedTransaction, exp: Expected
   // input mint; with `refund_native` (native input only) the program then pins our wallet as the
   // refund destination instead. `makerOutput` is pinned as given: our ATA for the output mint, or
   // our wallet itself for a native COOK payout.
-  const inAta = getAssociatedTokenAddressSync(exp.inputMint, exp.owner, true);
-  const outAta = getAssociatedTokenAddressSync(exp.outputMint, exp.owner, true);
+  const inAta = getAssociatedTokenAddressSync(
+    exp.inputMint,
+    exp.owner,
+    true,
+    exp.inputTokenProgram,
+  );
+  const outAta = getAssociatedTokenAddressSync(
+    exp.outputMint,
+    exp.owner,
+    true,
+    exp.outputTokenProgram,
+  );
   if (!same(makerInput, inAta)) throw refuse("input account is not our token account");
   if (exp.curve) {
     // A curve token has no ATA to pay into: the fill is counted on OUR position for the pinned pool.
@@ -341,7 +363,10 @@ export function assertPlaceTxTrustworthy(tx: VersionedTransaction, exp: Expected
   assertHousekeepingIxs(ixs, exp.owner, [], {
     allowedPrograms: ALLOWED_PROGRAMS,
     refuse,
-    extraAllowed: exp.curve ? [buyOptinIxMatcher(exp.owner, exp.curve.programId)] : [],
+    extraAllowed: [
+      ...(exp.curve ? [buyOptinIxMatcher(exp.owner, exp.curve.programId)] : []),
+      ...(exp.inputTaxed ? [harvestIxMatcher(exp.inputMint, reserve)] : []),
+    ],
   });
 }
 
@@ -374,10 +399,14 @@ function buyOptinIxMatcher(owner: PublicKey, programId: PublicKey): (ix: Decoded
     ix.data.every((b, i) => b === ENABLE_BUY_FOR_DISCRIMINATOR[i]);
 }
 
-/** The cancel transaction, checked the same way: our order, refund to us, nothing else. */
+/**
+ * The cancel transaction, checked the same way: our order, refund to us, nothing else. With
+ * `inputTaxed` (a transfer-fee input mint) the build may also harvest the tax withheld on this
+ * order's reserve, which Token-2022 requires before the reserve can close.
+ */
 export function assertCancelTxTrustworthy(
   tx: VersionedTransaction,
-  exp: { owner: PublicKey; order: PublicKey },
+  exp: { owner: PublicKey; order: PublicKey; inputMint?: PublicKey; inputTaxed?: boolean },
 ): void {
   const ixs = decodeMessageIxs(tx, "limit-order");
   const msg = tx.message as MessageV0;
@@ -399,7 +428,11 @@ export function assertCancelTxTrustworthy(
 
   // A partial unwrap co-signs with a throwaway native account the API pre-signed for us.
   const temps = otherSignersPresigned(tx, exp.owner, refuse);
-  assertHousekeepingIxs(ixs, exp.owner, temps, { allowedPrograms: ALLOWED_PROGRAMS, refuse });
+  assertHousekeepingIxs(ixs, exp.owner, temps, {
+    allowedPrograms: ALLOWED_PROGRAMS,
+    refuse,
+    extraAllowed: exp.inputTaxed && exp.inputMint ? [harvestIxMatcher(exp.inputMint, reserve)] : [],
+  });
 }
 
 // --- Aggregator API types -----------------------------------------------------------------------
@@ -410,8 +443,8 @@ export interface LimitOrderFees {
   takerFeeBps: number;
   takerStableFeeBps: number;
   /**
-   * The launchpad's fee on a curve SELL (anchor-launchpad-momoswap#70), charged on top of the
-   * authorization's floor. Only an agg with cookiebox#7 reports it.
+   * The launchpad's fee on a curve SELL, charged on top of the authorization's floor. Only an
+   * aggregator that reports it fills this field.
    */
   curveSellFeeBps?: number;
 }
@@ -871,6 +904,9 @@ export async function placeLimitOrder(args: {
   // native COOK ⇒ the refund is pinned to our wallet; unwrapping a COOK output ⇒ so is the payout.
   const refundNative = (args.wrapSol ?? true) && args.inputMint === COOK_MINT;
   const payoutNative = (args.unwrapSol ?? true) && args.outputMint === COOK_MINT;
+  // Read the mints ourselves: which token program owns each ATA, and whether the input is taxed.
+  const programs = await fetchMintPrograms(getConnection(), [inputMint, outputMint]);
+  const inProgram = mintProgramOf(programs, inputMint);
   assertPlaceTxTrustworthy(tx, {
     owner,
     inputMint,
@@ -883,6 +919,9 @@ export async function placeLimitOrder(args: {
     refundNative,
     payoutNative,
     order,
+    inputTokenProgram: inProgram.program,
+    outputTokenProgram: mintProgramOf(programs, outputMint).program,
+    inputTaxed: inProgram.transferFee != null,
   });
 
   const { signature } = await simulateSignSendConfirm(tx, signer, built, "limit-order placement", {
@@ -1131,7 +1170,11 @@ export async function cancelLimitOrder(args: {
     throw apiError(e, "cancelling the order");
   }
   const tx = VersionedTransaction.deserialize(Buffer.from(built.transactionBase64, "base64"));
-  assertCancelTxTrustworthy(tx, { owner, order });
+  const inputMint = new PublicKey(mine.inputMint);
+  const inputTaxed =
+    mintProgramOf(await fetchMintPrograms(getConnection(), [inputMint]), inputMint).transferFee !=
+    null;
+  assertCancelTxTrustworthy(tx, { owner, order, inputMint, inputTaxed });
 
   const { signature } = await simulateSignSendConfirm(tx, signer, built, "limit-order cancel", {
     order,

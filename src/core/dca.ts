@@ -42,7 +42,15 @@ import {
   simulateSignSendConfirm,
   takingAmountForPrice,
 } from "./limitOrders";
+import { getConnection } from "./rpc";
 import { resolveMeta } from "./trade";
+import {
+  fetchMintPrograms,
+  harvestIxMatcher,
+  mintProgramOf,
+  netOfTransferFee,
+  resizeForTaxedDeposit,
+} from "./transferFee";
 import {
   assertHousekeepingIxs,
   decodeMessageIxs,
@@ -135,6 +143,11 @@ export interface ExpectedOpen {
   payoutNative: boolean;
   /** The schedule address the API reported. */
   dca: PublicKey;
+  /** Token programs owning the two mints (default: classic SPL) — our ATAs live under them. */
+  inputTokenProgram?: PublicKey;
+  outputTokenProgram?: PublicKey;
+  /** Transfer-fee input: the build may harvest the tax withheld on OUR reserve, nothing more. */
+  inputTaxed?: boolean;
 }
 
 /**
@@ -196,20 +209,43 @@ export function assertOpenTxTrustworthy(tx: VersionedTransaction, exp: ExpectedO
   if (!same(reserve, dcaReservePda(dca))) throw refuse("reserve address");
   // The budget leaves OUR token account for the reserve, so `user_input_account` is always our ATA;
   // `refund_native` then makes the program pin our wallet as the refund destination instead.
-  const inAta = getAssociatedTokenAddressSync(exp.inputMint, exp.owner, true);
-  const outAta = getAssociatedTokenAddressSync(exp.outputMint, exp.owner, true);
+  const inAta = getAssociatedTokenAddressSync(
+    exp.inputMint,
+    exp.owner,
+    true,
+    exp.inputTokenProgram,
+  );
+  const outAta = getAssociatedTokenAddressSync(
+    exp.outputMint,
+    exp.owner,
+    true,
+    exp.outputTokenProgram,
+  );
   if (!same(userInput, inAta)) throw refuse("input account is not our token account");
   if (!same(userOutput, exp.payoutNative ? exp.owner : outAta)) throw refuse("payout account");
 
   const presigned = otherSignersPresigned(tx, exp.owner, refuse);
   if (presigned.length !== 1 || !same(presigned[0]!, base)) throw refuse("unexpected extra signer");
-  assertHousekeepingIxs(ixs, exp.owner, [], { allowedPrograms: ALLOWED_PROGRAMS, refuse });
+  assertHousekeepingIxs(ixs, exp.owner, [], {
+    allowedPrograms: ALLOWED_PROGRAMS,
+    refuse,
+    extraAllowed: exp.inputTaxed ? [harvestIxMatcher(exp.inputMint, reserve)] : [],
+  });
 }
 
 /** The close transaction, checked the same way: our schedule, refund to us, nothing else. */
 export function assertCloseTxTrustworthy(
   tx: VersionedTransaction,
-  exp: { owner: PublicKey; dca: PublicKey; inputMint: PublicKey; refundNative: boolean },
+  exp: {
+    owner: PublicKey;
+    dca: PublicKey;
+    inputMint: PublicKey;
+    refundNative: boolean;
+    /** Token program owning the input mint (default: classic SPL) — our refund ATA lives there. */
+    inputTokenProgram?: PublicKey;
+    /** Transfer-fee input: the build may harvest the tax withheld on this schedule's reserve. */
+    inputTaxed?: boolean;
+  },
 ): void {
   const ixs = decodeMessageIxs(tx, "DCA");
   const msg = tx.message as MessageV0;
@@ -232,12 +268,16 @@ export function assertCloseTxTrustworthy(
   // ATA otherwise. Either way it must be ours.
   const expectedRefund = exp.refundNative
     ? exp.owner
-    : getAssociatedTokenAddressSync(exp.inputMint, exp.owner, true);
+    : getAssociatedTokenAddressSync(exp.inputMint, exp.owner, true, exp.inputTokenProgram);
   if (!same(userInput, expectedRefund)) throw refuse("refund account is not ours");
 
   // A partial unwrap co-signs with a throwaway native account the API pre-signed for us.
   const temps = otherSignersPresigned(tx, exp.owner, refuse);
-  assertHousekeepingIxs(ixs, exp.owner, temps, { allowedPrograms: ALLOWED_PROGRAMS, refuse });
+  assertHousekeepingIxs(ixs, exp.owner, temps, {
+    allowedPrograms: ALLOWED_PROGRAMS,
+    refuse,
+    extraAllowed: exp.inputTaxed ? [harvestIxMatcher(exp.inputMint, reserve)] : [],
+  });
 }
 
 // --- Aggregator API types ---------------------------------------------------------------------------
@@ -465,7 +505,14 @@ export interface OpenDcaResult {
   explorerUrl: string;
   dca: string;
   reserve: string;
-  input: { mint: string; symbol: string | null; deposited: string; perCycle: string };
+  input: {
+    mint: string;
+    symbol: string | null;
+    deposited: string;
+    /** What the reserve holds: `deposited` less a transfer-fee input's tax on the deposit. */
+    escrowed: string;
+    perCycle: string;
+  };
   output: { mint: string; symbol: string | null };
   /** As the PROGRAM derives it (`ceil(deposited / perCycle)`) — not always the count asked for. */
   cycles: number;
@@ -629,6 +676,20 @@ export async function openDca(args: {
     );
   }
 
+  // A transfer-fee input deposits short: the program records what ARRIVED, so the
+  // agg's builder re-sizes the slice to keep the cycle count on it and scales the band with it.
+  // Recompute that here with the same math — the verifier then holds the build to OUR sizing, and
+  // the result reports what the program will actually run.
+  const programs = await fetchMintPrograms(getConnection(), [inputMint, outputMint]);
+  const inProgram = mintProgramOf(programs, inputMint);
+  const sized = resizeForTaxedDeposit(
+    { inDeposited, inAmountPerCycle, minOutAmount: minOut, maxOutAmount: maxOut },
+    inProgram.transferFee,
+  );
+  const slice = sized.inAmountPerCycle;
+  const bandMin = sized.minOutAmount;
+  const bandMax = sized.maxOutAmount;
+
   // The keeper fills a cycle through the aggregator's router, so its executable quote for ONE
   // SLICE is the only rate that means anything — a band set against a mid price is a band the
   // keeper can never satisfy, and a skipped cycle is never caught up.
@@ -639,7 +700,7 @@ export async function openDca(args: {
       route = await quoteAgg(
         args.inputMint,
         args.outputMint,
-        inAmountPerCycle.toString(),
+        slice.toString(),
         DEFAULT_SLIPPAGE_BPS,
         owner.toBase58(),
       );
@@ -657,19 +718,19 @@ export async function openDca(args: {
       );
     }
     const marketOut = BigInt(route.grossOutAmount ?? route.totalOutAmount);
-    const rate = priceFromAmounts(inAmountPerCycle, marketOut, input.dec, output.dec);
+    const rate = priceFromAmounts(slice, marketOut, input.dec, output.dec);
     market = rate == null ? null : { rate };
-    const slice = rawToUi(inAmountPerCycle, input.dec);
+    const sliceStr = rawToUi(slice, input.dec);
     const marketStr = rawToUi(marketOut, output.dec);
-    if (minOut > 0n && minOut > marketOut) {
+    if (bandMin > 0n && bandMin > marketOut) {
       throw new CookieMcpError(
-        `one cycle of ${slice} ${input.sym ?? "input"} buys about ${marketStr} ${output.sym ?? "output"} right now, below your minPrice — every cycle would be SKIPPED, and a skipped cycle is never caught up`,
+        `one cycle of ${sliceStr} ${input.sym ?? "input"} buys about ${marketStr} ${output.sym ?? "output"} right now, below your minPrice — every cycle would be SKIPPED, and a skipped cycle is never caught up`,
         "lower minPrice (it is a floor against a bad fill, not a target), or pass skipMarketCheck: true if you are deliberately waiting for a better rate",
       );
     }
-    if (maxOut > 0n && maxOut < marketOut) {
+    if (bandMax > 0n && bandMax < marketOut) {
       throw new CookieMcpError(
-        `one cycle of ${slice} ${input.sym ?? "input"} buys about ${marketStr} ${output.sym ?? "output"} right now, ABOVE your maxPrice — every cycle would be skipped`,
+        `one cycle of ${sliceStr} ${input.sym ?? "input"} buys about ${marketStr} ${output.sym ?? "output"} right now, ABOVE your maxPrice — every cycle would be skipped`,
         "raise maxPrice (it only guards against an implausibly good fill on a manipulated pool), or pass skipMarketCheck: true",
       );
     }
@@ -707,14 +768,17 @@ export async function openDca(args: {
     inputMint,
     outputMint,
     inDeposited,
-    inAmountPerCycle,
+    inAmountPerCycle: slice,
     cycleFrequency: args.cycleSeconds,
-    minOut,
-    maxOut,
+    minOut: bandMin,
+    maxOut: bandMax,
     startAt,
     refundNative,
     payoutNative,
     dca: new PublicKey(built.dca),
+    inputTokenProgram: inProgram.program,
+    outputTokenProgram: mintProgramOf(programs, outputMint).program,
+    inputTaxed: inProgram.transferFee != null,
   });
 
   const { signature } = await simulateSignSendConfirm(tx, signer, built, "DCA open", {
@@ -735,22 +799,27 @@ export async function openDca(args: {
       mint: args.inputMint,
       symbol: input.sym,
       deposited: rawToUi(inDeposited, input.dec),
-      perCycle: rawToUi(inAmountPerCycle, input.dec),
+      // What the reserve holds and slices — short of `deposited` by a transfer-fee input's tax.
+      escrowed: rawToUi(netOfTransferFee(inDeposited, inProgram.transferFee), input.dec),
+      perCycle: rawToUi(slice, input.dec),
     },
     output: { mint: args.outputMint, symbol: output.sym },
     cycles,
     cycleSeconds: args.cycleSeconds,
     startsAt: new Date((startAt || Math.floor(Date.now() / 1000)) * 1000).toISOString(),
-    minPerCycle: minOut > 0n ? rawToUi(minOut, output.dec) : null,
-    minPerCycleNet: minOut > 0n ? rawToUi(makerNetOut(minOut, feeBps), output.dec) : null,
-    maxPerCycle: maxOut > 0n ? rawToUi(maxOut, output.dec) : null,
+    minPerCycle: bandMin > 0n ? rawToUi(bandMin, output.dec) : null,
+    minPerCycleNet: bandMin > 0n ? rawToUi(makerNetOut(bandMin, feeBps), output.dec) : null,
+    maxPerCycle: bandMax > 0n ? rawToUi(bandMax, output.dec) : null,
     makerFeeBps: feeBps,
     market,
     payoutNative,
     refundNative,
     wrappedCook: rawToUi(built.wrappedLamports ?? "0", 9),
     note:
-      `the whole budget is escrowed now; the keeper releases ${rawToUi(inAmountPerCycle, input.dec)} ` +
+      (inProgram.transferFee
+        ? `${input.sym ?? "the input"} has a ${inProgram.transferFee.bps / 100}% transfer tax: it came off the deposit, and each cycle's escrow hops pay it again. `
+        : "") +
+      `the whole budget is escrowed now; the keeper releases ${rawToUi(slice, input.dec)} ` +
       `${input.sym ?? "input"} every ${args.cycleSeconds}s and pays the proceeds minus the maker fee. ` +
       "A cycle outside the band (or with no route) is SKIPPED, never caught up. Close any time with " +
       "close_dca to get the unspent remainder back; a finished schedule closes itself.",
@@ -812,11 +881,15 @@ export async function closeDca(args: {
     throw dcaApiError(e, "closing the schedule");
   }
   const tx = VersionedTransaction.deserialize(Buffer.from(built.transactionBase64, "base64"));
+  const inputMint = new PublicKey(mine.inputMint);
+  const inProgram = mintProgramOf(await fetchMintPrograms(getConnection(), [inputMint]), inputMint);
   assertCloseTxTrustworthy(tx, {
     owner,
     dca,
-    inputMint: new PublicKey(mine.inputMint),
+    inputMint,
     refundNative: mine.refundNative,
+    inputTokenProgram: inProgram.program,
+    inputTaxed: inProgram.transferFee != null,
   });
 
   const { signature } = await simulateSignSendConfirm(tx, signer, built, "DCA close", { dca });

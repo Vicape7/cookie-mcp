@@ -16,6 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   on each chain.
 - `bridge` refuses a native payout below the rent-exempt minimum into an empty wallet. That delivery
   would be rejected on every relayer retry after the source side had already taken the funds.
+- **Limit orders and DCA on Token-2022 transfer-fee tokens**. The pre-sign verifiers derive our accounts under each mint's own token program, and
+  allow exactly one extra instruction: `HarvestWithheldTokensToMint` for this order's or schedule's
+  own reserve. Token-2022 won't close a reserve while the tax is still held inside it. `open_dca`
+  re-sizes a taxed deposit's slice and band the same way the aggregator does, so the cycle count
+  holds on what arrives. It then holds the build to those numbers and reports `input.escrowed`.
+  Live once the upgraded limit-order and DCA programs are deployed and the aggregator's
+  `transferFeeMints` flags are on. Until then the aggregator refuses these pairs with a 422.
 
 ### Changed
 

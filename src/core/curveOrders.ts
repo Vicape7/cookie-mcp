@@ -102,9 +102,9 @@ const ixCoder = new anchorPkg.BorshInstructionCoder(limitOrderIdl as Idl);
 /**
  * `Config.sale_auth_fee_bps` — the limit-order fee the launchpad's `sell_authorized` takes from a
  * curve sell's proceeds, ON TOP of the authorization's floor: the program checks the floor on what
- * the maker receives after it (anchor-launchpad-momoswap#70). A u16 appended into Config's padding
- * right after `pending_authority`, which ends at byte 313; zeroed padding reads 0 = no fee, which is
- * also what a launchpad without #70 honestly means.
+ * the maker receives after it. A u16 appended into Config's padding right after
+ * `pending_authority`, which ends at byte 313; zeroed padding reads 0 = no fee, which is also what
+ * a launchpad deployed before the fee existed honestly means.
  */
 export const SALE_AUTH_FEE_BPS_OFFSET = 313;
 

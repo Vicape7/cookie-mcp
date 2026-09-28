@@ -665,7 +665,7 @@ describe("devBuyCookForSupplyPct / describeDevBuy", () => {
   });
 });
 
-// The real shape of a momoswap-backend#113 failure: Anchor names the account and the constraint on ONE
+// The real shape of an Anchor constraint failure: Anchor names the account and the constraint on ONE
 // line, then prints the two compared pubkeys on lines of their own, and only then does the program's
 // own "failed" line arrive. `logs.slice(-3)` therefore ends at `Right: | <pubkey> | Program … failed`
 // and drops the only line that explains anything — the bug this suite pins.

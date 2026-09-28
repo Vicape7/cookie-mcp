@@ -356,7 +356,7 @@ describe("curve-buy placement passes assertPlaceTxTrustworthy — and tampering 
   });
 });
 
-describe("the launchpad's curve-sell fee (anchor-launchpad-momoswap#70)", () => {
+describe("the launchpad's curve-sell fee", () => {
   /** The live `Config` is allocated at `Config::SPACE` = 337 bytes. */
   const CONFIG_SPACE = 337;
 
@@ -372,7 +372,7 @@ describe("the launchpad's curve-sell fee (anchor-launchpad-momoswap#70)", () => 
     expect(readSaleAuthFeeBps(data)).toBe(20);
   });
 
-  it("reads a pre-#70 Config (zeroed padding) and a short account as no fee", () => {
+  it("reads a pre-fee Config (zeroed padding) and a short account as no fee", () => {
     expect(readSaleAuthFeeBps(new Uint8Array(CONFIG_SPACE))).toBe(0);
     expect(readSaleAuthFeeBps(new Uint8Array(SALE_AUTH_FEE_BPS_OFFSET + 1))).toBe(0);
   });
