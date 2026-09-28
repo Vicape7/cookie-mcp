@@ -20,6 +20,7 @@ export * from "./core/trade";
 export * from "./core/transfer";
 export * from "./core/stake";
 export * from "./core/bridge";
+export * from "./core/bridgeRoutes";
 export * from "./core/limitOrders";
 export * from "./core/dca";
 export * from "./core/liquidity";

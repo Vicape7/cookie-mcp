@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 
-import { mapBalances, sumTokenAmounts, type ParsedTokenAmount } from "./balances";
+import {
+  mapBalances,
+  solanaBridgeMints,
+  sumTokenAmounts,
+  type ParsedTokenAmount,
+} from "./balances";
 import { COOK_MINT } from "./config";
 import type { CookiescanToken } from "./cookiescan";
 
@@ -85,5 +90,34 @@ describe("sumTokenAmounts", () => {
 
   it("skips accounts with no parsed amount", () => {
     expect(sumTokenAmounts([undefined, ta("7")])).toEqual({ raw: 7n, decimals: 6 });
+  });
+});
+
+describe("solanaBridgeMints", () => {
+  const side = (mint: string | null, decimals = 9) => ({
+    chain: "solana" as const,
+    warp: new PublicKey("DWxkDF63gF5pMoAiACjkkYgr4onz4WPZi9wq59gctU6T"),
+    type: (mint ? "collateral" : "native") as "collateral" | "native",
+    mint: mint ? new PublicKey(mint) : null,
+    tokenProgram: null,
+    decimals,
+    mailbox: new PublicKey("E588QtVUvresuXq2KoNEwAmoifCzYGpRBdHByN9KQMbi"),
+    igp: null,
+  });
+  const route = (symbol: string, solana: ReturnType<typeof side>) => ({
+    symbol,
+    name: null,
+    cookie: { ...side(null), chain: "cookie" as const },
+    solana,
+  });
+  const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+  it("lists a token added to the bridge, but not SOL (no mint) or COOK (its own field)", () => {
+    const out = solanaBridgeMints([
+      route("COOK", side("36ZrtQoab5MhhySaP1YSTwUahSk6GRVUTtZ6cuVfm9e1", 6)),
+      route("SOL", side(null)),
+      route("USDC", side(USDC, 6)),
+    ]);
+    expect(out.map((t) => [t.symbol, t.mint.toBase58(), t.decimals])).toEqual([["USDC", USDC, 6]]);
   });
 });

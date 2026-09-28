@@ -58,6 +58,9 @@ const EXPECTED_TOOLS = [
   "list_domain",
   "buy_domain",
   "cancel_domain_listing",
+  "get_bridge_tokens",
+  "bridge",
+  "bridge_status",
 ];
 
 async function main() {

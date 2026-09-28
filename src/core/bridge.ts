@@ -1,9 +1,10 @@
-// bridge — move COOK 1:1 between Cookie Chain and Solana mainnet over Hyperlane warp routes.
+// bridge — move a token 1:1 between Cookie Chain and Solana mainnet over Hyperlane warp routes.
 //
 // This is a self-contained port of hyperlane-cookies/backend/lib/hyperlaneSealevel.ts (the same
-// transfer-remote flow the Hyperlane SDK uses, reimplemented without the SDK runtime). Cookie side is
-// a `native` warp (locks native COOK); Solana side is a `collateral` warp (locks SPL COOK, a
-// Token-2022 mint). The instruction data is hand-encoded (no borsh dep) — the layout is fixed:
+// transfer-remote flow the Hyperlane SDK uses, reimplemented without the SDK runtime). Which tokens
+// exist, and each side's route type (native / synthetic / collateral), mint, decimals and IGP, are read
+// from the chain by bridgeRoutes.ts — so a route added after this release works without a change here.
+// The instruction data is hand-encoded (no borsh dep) — the layout is fixed:
 // [8-byte discriminator][u8 instruction=1][u32 dest domain LE][32-byte recipient][u256 amount LE].
 //
 // Flow: build the transfer-remote tx → partial-sign the ephemeral "unique message" signer (replay
@@ -25,15 +26,20 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 
+import { BRIDGE, COOKIE_DOMAIN, SOLANA_DOMAIN, explorerTxUrl, solanaExplorerTxUrl } from "./config";
 import {
-  BRIDGE,
-  COOKIE_DOMAIN,
-  COOKIE_WARP_PROGRAM_ID,
-  SOLANA_DOMAIN,
-  SOLANA_WARP_PROGRAM_ID,
-  explorerTxUrl,
-  solanaExplorerTxUrl,
-} from "./config";
+  deriveAtaPayerPda,
+  deriveEscrowPda,
+  deriveNativeCollateralPda,
+  deriveTokenPda,
+  NATIVE_SYMBOL,
+  resolveBridgeToken,
+  type BridgeChain,
+  type BridgeRoute,
+  type IgpConfig,
+  type RouteSide,
+} from "./bridgeRoutes";
+import { MIN_BRIDGE_COOK, MINIMUM_BASIS_LABEL, getBridgeMinimum } from "./bridgeMinimum";
 import { confirmSent } from "./confirm";
 import { CookieMcpError } from "./errors";
 import { getConnection, getSolanaConnection } from "./rpc";
@@ -100,16 +106,8 @@ const deriveDispatchAuthority = (warp: PublicKey) =>
   pda(["hyperlane_dispatcher", SEP, "dispatch_authority"], warp);
 const deriveDispatchedMessage = (mailbox: PublicKey, uniqueMsg: PublicKey) =>
   pda(["hyperlane", SEP, "dispatched_message", SEP, uniqueMsg.toBuffer()], mailbox);
-const deriveTokenPda = (warp: PublicKey) =>
-  pda(["hyperlane_message_recipient", SEP, "handle", SEP, "account_metas"], warp);
-export const deriveNativeCollateralPda = (warp: PublicKey) =>
-  pda(["hyperlane_token", SEP, "native_collateral"], warp);
-export const deriveEscrowPda = (warp: PublicKey) => pda(["hyperlane_token", SEP, "escrow"], warp);
-/** The route's ATA-payer PDA. On a cookie→solana delivery the warp program creates the recipient's SPL
- *  COOK associated token account if it doesn't exist and pays the rent out of this account — see the
- *  recipient-account preflight below. It is a plain system account with no data. */
-export const deriveAtaPayerPda = (warp: PublicKey) =>
-  pda(["hyperlane_token", SEP, "ata_payer"], warp);
+// Re-exported so existing importers (and the golden-PDA tests) keep one import path.
+export { deriveAtaPayerPda, deriveEscrowPda, deriveNativeCollateralPda };
 const deriveIgpProgramData = (igpProgramId: PublicKey) =>
   pda(["hyperlane_igp", SEP, "program_data"], igpProgramId);
 const deriveGasPayment = (igpProgramId: PublicKey, uniqueMsg: PublicKey) =>
@@ -130,7 +128,7 @@ async function readOverheadIgpInner(
   if (!info) {
     throw new CookieMcpError(
       `Hyperlane OverheadIgp account not found: ${overheadIgpAccount.toBase58()}`,
-      "the bridge IGP address may be wrong for this network — check the *_OVERHEAD_IGP_ACCOUNT env",
+      "the route's token account names an IGP that isn't on this chain — check the RPC points at the right network",
     );
   }
   const buf = info.data;
@@ -164,121 +162,97 @@ export function messageIdFromLogs(logs: string[] | null | undefined): string | n
 
 // --- Route wiring ------------------------------------------------------------------------------
 
-interface Route {
-  type: "native" | "collateral";
+const CHAIN_NAME: Record<BridgeChain, string> = { cookie: "Cookie Chain", solana: "Solana" };
+
+/** One direction of a token's route. Exported with routeFor/buildTransferRemoteIx for
+ *  scripts/verify-bridge.ts, which simulates real transfers without signing. */
+export interface Route {
+  symbol: string;
+  source: RouteSide;
+  dest: RouteSide;
   sourceConn: Connection;
   destConn: Connection;
-  sourceDecimals: number;
   destinationDomain: number;
-  warp: PublicKey;
-  mailbox: PublicKey;
-  igpProgramId: PublicKey;
-  overheadIgp: PublicKey;
-  splMint?: PublicKey;
-  destDecimals: number;
-  /** Where the destination chain pays the release from — see assertDestinationCollateral. */
-  destCollateral: PublicKey | null;
-  destCollateralKind: "native" | "tokenAccount";
-  /** Cookie→Solana only: the SPL mint credited on the far side, and the PDA that pays to create the
-   *  recipient's token account when they don't have one yet. */
-  destSplMint?: PublicKey;
-  destAtaPayer: PublicKey | null;
-  destMailbox: PublicKey;
-  sourceChain: "cookie" | "solana";
   sourceExplorerTxUrl: (sig: string) => string;
 }
 
-function parsePk(addr: string, label: string): PublicKey {
-  try {
-    return new PublicKey(addr);
-  } catch {
-    throw new CookieMcpError(`invalid ${label}: ${addr}`, "expected a base58 pubkey");
-  }
-}
-
-/** The far side's warp program id only matters for the collateral preflight, and both ids ship as
- *  defaults — so a missing/garbled one downgrades the check to "unchecked" rather than failing the
- *  bridge, preserving the behaviour from before the preflight existed. */
-function optionalPk(
-  addr: string | undefined,
-  derive: (warp: PublicKey) => PublicKey,
-): PublicKey | null {
-  if (!addr) return null;
-  try {
-    return derive(new PublicKey(addr));
-  } catch {
-    return null;
-  }
-}
-
-function resolveRoute(direction: BridgeDirection): Route {
-  if (direction === "cookie-to-solana") {
-    if (!COOKIE_WARP_PROGRAM_ID) {
-      throw new CookieMcpError(
-        "COOKIE_WARP_PROGRAM_ID is not set",
-        "the Cookie-side Hyperlane warp route program id is a deploy output not shipped in the repo — set COOKIE_WARP_PROGRAM_ID (and SOLANA_WARP_PROGRAM_ID) in the environment",
-      );
-    }
-    return {
-      type: "native",
-      sourceConn: getConnection(),
-      destConn: getSolanaConnection(),
-      sourceDecimals: BRIDGE.cookie.decimals,
-      destinationDomain: SOLANA_DOMAIN,
-      warp: parsePk(COOKIE_WARP_PROGRAM_ID, "COOKIE_WARP_PROGRAM_ID"),
-      mailbox: parsePk(BRIDGE.cookie.mailbox, "cookie mailbox"),
-      igpProgramId: parsePk(BRIDGE.cookie.igpProgramId, "cookie IGP program"),
-      overheadIgp: parsePk(BRIDGE.cookie.overheadIgp, "cookie overhead IGP"),
-      destDecimals: BRIDGE.solana.decimals,
-      destCollateral: optionalPk(SOLANA_WARP_PROGRAM_ID, deriveEscrowPda),
-      destCollateralKind: "tokenAccount",
-      destSplMint: parsePk(BRIDGE.solana.splMint, "solana COOK mint"),
-      destAtaPayer: optionalPk(SOLANA_WARP_PROGRAM_ID, deriveAtaPayerPda),
-      destMailbox: parsePk(BRIDGE.solana.mailbox, "solana mailbox"),
-      sourceChain: "cookie",
-      sourceExplorerTxUrl: explorerTxUrl,
-    };
-  }
-  if (!SOLANA_WARP_PROGRAM_ID) {
-    throw new CookieMcpError(
-      "SOLANA_WARP_PROGRAM_ID is not set",
-      "the Solana-side Hyperlane warp route program id is a deploy output not shipped in the repo — set SOLANA_WARP_PROGRAM_ID (and COOKIE_WARP_PROGRAM_ID) in the environment",
-    );
-  }
+export function routeFor(token: BridgeRoute, direction: BridgeDirection): Route {
+  const toSolana = direction === "cookie-to-solana";
   return {
-    type: "collateral",
-    sourceConn: getSolanaConnection(),
-    destConn: getConnection(),
-    sourceDecimals: BRIDGE.solana.decimals,
-    destinationDomain: COOKIE_DOMAIN,
-    warp: parsePk(SOLANA_WARP_PROGRAM_ID, "SOLANA_WARP_PROGRAM_ID"),
-    mailbox: parsePk(BRIDGE.solana.mailbox, "solana mailbox"),
-    igpProgramId: parsePk(BRIDGE.solana.igpProgramId, "solana IGP program"),
-    overheadIgp: parsePk(BRIDGE.solana.overheadIgp, "solana overhead IGP"),
-    splMint: parsePk(BRIDGE.solana.splMint, "solana COOK mint"),
-    destDecimals: BRIDGE.cookie.decimals,
-    destCollateral: optionalPk(COOKIE_WARP_PROGRAM_ID, deriveNativeCollateralPda),
-    destCollateralKind: "native",
-    destAtaPayer: null, // native release: the recipient is a wallet, there is no account to create
-    destMailbox: parsePk(BRIDGE.cookie.mailbox, "cookie mailbox"),
-    sourceChain: "solana",
-    sourceExplorerTxUrl: solanaExplorerTxUrl,
+    symbol: token.symbol,
+    source: toSolana ? token.cookie : token.solana,
+    dest: toSolana ? token.solana : token.cookie,
+    sourceConn: toSolana ? getConnection() : getSolanaConnection(),
+    destConn: toSolana ? getSolanaConnection() : getConnection(),
+    destinationDomain: toSolana ? SOLANA_DOMAIN : COOKIE_DOMAIN,
+    sourceExplorerTxUrl: toSolana ? explorerTxUrl : solanaExplorerTxUrl,
   };
 }
 
 // --- Instruction builder -----------------------------------------------------------------------
 
-async function buildTransferRemoteIx(
+/**
+ * The plugin-specific accounts appended after the shared transfer_remote accounts. Order and
+ * writability must match the Sealevel token plugin exactly:
+ *   native     → system program, native_collateral PDA (w)
+ *   synthetic  → Token-2022 program, mint PDA (w), sender ATA (w)
+ *   collateral → token program, mint (w), sender ATA (w), escrow PDA (w)
+ */
+export function pluginAccountMetas(side: RouteSide, sender: PublicKey): AccountMeta[] {
+  if (side.type === "native") {
+    return [
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: deriveNativeCollateralPda(side.warp), isSigner: false, isWritable: true },
+    ];
+  }
+  const mint = side.mint!;
+  const tokenProgram = side.tokenProgram!;
+  const senderAta = getAssociatedTokenAddressSync(mint, sender, true, tokenProgram);
+  const metas: AccountMeta[] = [
+    { pubkey: tokenProgram, isSigner: false, isWritable: false },
+    { pubkey: mint, isSigner: false, isWritable: true },
+    { pubkey: senderAta, isSigner: false, isWritable: true },
+  ];
+  if (side.type === "collateral") {
+    metas.push({ pubkey: deriveEscrowPda(side.warp), isSigner: false, isWritable: true });
+  }
+  return metas;
+}
+
+/** Accounts 9–13: the IGP the route is configured with. A plain IGP takes its account directly; an
+ *  overhead IGP takes the overhead account followed by the inner IGP it wraps; no IGP, no accounts. */
+export function igpAccountMetas(
+  igp: IgpConfig | null,
+  uniqueMsg: PublicKey,
+  innerIgp: PublicKey | null,
+): AccountMeta[] {
+  if (!igp) return [];
+  const metas: AccountMeta[] = [
+    { pubkey: igp.program, isSigner: false, isWritable: false }, // 9 IGP program
+    { pubkey: deriveIgpProgramData(igp.program), isSigner: false, isWritable: true }, // 10 (w)
+    { pubkey: deriveGasPayment(igp.program, uniqueMsg), isSigner: false, isWritable: true }, // 11 (w)
+  ];
+  if (igp.kind === "overheadIgp") {
+    metas.push({ pubkey: igp.account, isSigner: false, isWritable: false }); // 12 overhead IGP
+    metas.push({ pubkey: innerIgp!, isSigner: false, isWritable: true }); // 13 inner IGP (w)
+  } else {
+    metas.push({ pubkey: igp.account, isSigner: false, isWritable: true }); // 12 IGP (w)
+  }
+  return metas;
+}
+
+export async function buildTransferRemoteIx(
   route: Route,
   sender: PublicKey,
   uniqueMsg: PublicKey,
   recipient32: Uint8Array,
   amount: bigint,
 ): Promise<TransactionInstruction> {
-  const { warp, mailbox, igpProgramId, overheadIgp, sourceConn, type } = route;
-  const innerIgp = await readOverheadIgpInner(sourceConn, overheadIgp);
+  const { warp, mailbox, igp } = route.source;
+  const innerIgp =
+    igp?.kind === "overheadIgp" ? await readOverheadIgpInner(route.sourceConn, igp.account) : null;
 
-  const baseKeys: AccountMeta[] = [
+  const keys: AccountMeta[] = [
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // 0 system
     { pubkey: SPL_NOOP_PROGRAM_ID, isSigner: false, isWritable: false }, // 1 spl_noop
     { pubkey: deriveTokenPda(warp), isSigner: false, isWritable: false }, // 2 token PDA
@@ -288,60 +262,31 @@ async function buildTransferRemoteIx(
     { pubkey: sender, isSigner: true, isWritable: false }, // 6 sender (signer)
     { pubkey: uniqueMsg, isSigner: true, isWritable: false }, // 7 unique message signer
     { pubkey: deriveDispatchedMessage(mailbox, uniqueMsg), isSigner: false, isWritable: true }, // 8 (w)
-    { pubkey: igpProgramId, isSigner: false, isWritable: false }, // 9 IGP program
-    { pubkey: deriveIgpProgramData(igpProgramId), isSigner: false, isWritable: true }, // 10 (w)
-    { pubkey: deriveGasPayment(igpProgramId, uniqueMsg), isSigner: false, isWritable: true }, // 11 (w)
-    { pubkey: overheadIgp, isSigner: false, isWritable: false }, // 12 overhead IGP
-    { pubkey: innerIgp, isSigner: false, isWritable: true }, // 13 inner IGP (w)
+    ...igpAccountMetas(igp, uniqueMsg, innerIgp), // 9–13
+    ...pluginAccountMetas(route.source, sender),
   ];
 
-  let extraKeys: AccountMeta[];
-  if (type === "native") {
-    extraKeys = [
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // 14 system (again)
-      { pubkey: deriveNativeCollateralPda(warp), isSigner: false, isWritable: true }, // 15 collateral (w)
-    ];
-  } else {
-    const mint = route.splMint!;
-    // Read the token program from the mint owner — mainnet COOK is Token-2022, so passing the classic
-    // TOKEN_PROGRAM_ID would make the warp reject the tx.
-    const mintInfo = await sourceConn.getAccountInfo(mint, "confirmed");
-    if (!mintInfo) {
-      throw new CookieMcpError(
-        `SPL COOK mint not found on Solana: ${mint.toBase58()}`,
-        "check COOK_SPL_MINT / SOLANA_RPC_URL",
-      );
-    }
-    const tokenProgram = mintInfo.owner;
-    const senderAta = getAssociatedTokenAddressSync(mint, sender, true, tokenProgram);
-    extraKeys = [
-      { pubkey: tokenProgram, isSigner: false, isWritable: false }, // 14 token program
-      { pubkey: mint, isSigner: false, isWritable: true }, // 15 mint (w)
-      { pubkey: senderAta, isSigner: false, isWritable: true }, // 16 sender ATA (w)
-      { pubkey: deriveEscrowPda(warp), isSigner: false, isWritable: true }, // 17 escrow (w)
-    ];
-  }
-
   return new TransactionInstruction({
-    keys: [...baseKeys, ...extraKeys],
+    keys,
     programId: warp,
     data: encodeTransferRemoteIxData(route.destinationDomain, recipient32, amount),
   });
 }
 
 // --- Destination collateral preflight ----------------------------------------------------------
-// Neither side of the warp route mints: a transfer is RELEASED from the destination chain's collateral
-// account (Cookie's native-collateral PDA, or the Solana escrow). If that account is short, the source
-// tx still succeeds — it locks your funds and dispatches the message — and only the relayer's delivery
-// on the far side fails. simulateTransaction runs against the SOURCE chain, so it can never catch this.
-// Hence an explicit read of the destination before signing.
+// A native or collateral destination RELEASES the transfer from a fixed account (the native-collateral
+// PDA, or the escrow). If that account is short, the source tx still succeeds — it takes your funds
+// and dispatches the message — and only the relayer's delivery on the far side fails.
+// simulateTransaction runs against the SOURCE chain, so it can never catch this. Hence an explicit
+// read of the destination before signing. A synthetic destination mints, so it has no such limit.
 //
-// The two accounts need DIFFERENT reads: the Cookie PDA holds native COOK (a lamport balance), while
-// the Solana escrow IS the token account itself, not a wallet owning an ATA — an owner-based ATA lookup
-// finds nothing there and would report 0.
+// The two kinds need DIFFERENT reads: the native PDA holds lamports, while the escrow IS the token
+// account itself, not a wallet owning an ATA — an owner-based ATA lookup finds nothing there and
+// would report 0.
 
-/** Rescale a raw amount between the two sides' decimals (Cookie 9, Solana 6). Scaling down truncates,
- *  which can only UNDERstate the requirement by sub-dust — never overstate it into a false failure. */
+/** Rescale a raw amount between the two sides' decimals (COOK: Cookie 9, Solana 6). Scaling down
+ *  truncates, which can only UNDERstate the requirement by sub-dust — never overstate it into a false
+ *  failure. */
 export function scaleRaw(raw: bigint, fromDecimals: number, toDecimals: number): bigint {
   if (toDecimals === fromDecimals) return raw;
   const diff = BigInt(Math.abs(toDecimals - fromDecimals));
@@ -349,21 +294,20 @@ export function scaleRaw(raw: bigint, fromDecimals: number, toDecimals: number):
   return toDecimals > fromDecimals ? raw * factor : raw / factor;
 }
 
-/** Available collateral in the destination's raw units, or null when it can't be determined (missing
- *  warp id, unreadable account, RPC failure) — an unknown is reported, never treated as zero. */
+/** Available collateral in the destination's raw units, or null when it can't be determined
+ *  (unreadable account, RPC failure) — an unknown is reported, never treated as zero. */
 async function readDestinationCollateral(route: Route): Promise<bigint | null> {
-  const acct = route.destCollateral;
-  if (!acct) return null;
+  const { dest, destConn } = route;
   try {
-    if (route.destCollateralKind === "tokenAccount") {
-      const bal = await route.destConn.getTokenAccountBalance(acct, "confirmed");
+    if (dest.type === "collateral") {
+      const bal = await destConn.getTokenAccountBalance(deriveEscrowPda(dest.warp), "confirmed");
       return BigInt(bal.value.amount);
     }
     // Native side: the PDA carries account data, so its rent-exempt reserve is NOT releasable.
     // Subtract it rather than counting it as available collateral.
-    const info = await route.destConn.getAccountInfo(acct, "confirmed");
+    const info = await destConn.getAccountInfo(deriveNativeCollateralPda(dest.warp), "confirmed");
     if (!info) return null;
-    const rent = await route.destConn.getMinimumBalanceForRentExemption(info.data.length);
+    const rent = await destConn.getMinimumBalanceForRentExemption(info.data.length);
     const free = BigInt(info.lamports) - BigInt(rent);
     return free > 0n ? free : 0n;
   } catch {
@@ -372,31 +316,80 @@ async function readDestinationCollateral(route: Route): Promise<bigint | null> {
 }
 
 /** Throws when the destination provably cannot cover the release. Returns the collateral as a UI
- *  amount for the result, or null when the check couldn't run. */
+ *  amount for the result, or null when the destination mints (synthetic) or couldn't be read. */
 async function assertDestinationCollateral(
   route: Route,
   amountRaw: bigint,
 ): Promise<string | null> {
+  if (route.dest.type === "synthetic") return null;
   const available = await readDestinationCollateral(route);
   if (available === null) return null;
-  const needed = scaleRaw(amountRaw, route.sourceDecimals, route.destDecimals);
+  const decimals = route.dest.decimals;
+  const needed = scaleRaw(amountRaw, route.source.decimals, decimals);
   if (available < needed) {
-    const destChain = route.sourceChain === "cookie" ? "Solana" : "Cookie Chain";
     throw new CookieMcpError(
-      `not enough bridge collateral on ${destChain}: the route can release ` +
-        `${rawToUi(available, route.destDecimals)} COOK but this transfer needs ` +
-        `${rawToUi(needed, route.destDecimals)}`,
+      `not enough bridge collateral on ${CHAIN_NAME[route.dest.chain]}: the route can release ` +
+        `${rawToUi(available, decimals)} ${route.symbol} but this transfer needs ` +
+        `${rawToUi(needed, decimals)}`,
       "nothing was signed. The warp route releases from a fixed collateral account, so a larger " +
         "transfer than it holds would lock your funds on this side with an undeliverable message — " +
         "bridge a smaller amount, or wait for the route's collateral to be topped up",
     );
   }
-  return rawToUi(available, route.destDecimals);
+  return rawToUi(available, decimals);
 }
 
-// --- Recipient token account (cookie → solana only) --------------------------------------------
-// The Solana delivery credits ATA(recipient, COOK mint). If that account doesn't exist yet, the warp
-// program creates it and pays the rent from its `ata_payer` PDA. That PDA is funded ONCE at deploy time
+// --- Native payout to a new wallet -------------------------------------------------------------
+// A native destination pays out with a plain System transfer into the recipient. If the recipient
+// wallet doesn't exist yet and the payout is below the rent-exempt minimum for an empty account,
+// the runtime rejects that transfer — on every relayer retry, forever — after the source side has
+// already taken the funds. Nothing on the source chain can see it, so refuse it here.
+
+/** True when paying `payout` lamports into a wallet holding `recipientLamports` would be refused for
+ *  leaving it below rent. An existing wallet is already rent-exempt, so only an empty one matters. */
+export function nativePayoutBelowRent(args: {
+  recipientLamports: bigint;
+  payout: bigint;
+  rentExemptMinimum: bigint;
+}): boolean {
+  return args.recipientLamports === 0n && args.payout < args.rentExemptMinimum;
+}
+
+async function assertNativePayoutRentSafe(
+  route: Route,
+  recipient: PublicKey,
+  amountRaw: bigint,
+): Promise<void> {
+  if (route.dest.type !== "native") return;
+  const conn = route.destConn;
+  let recipientLamports: bigint;
+  let rentExemptMinimum: bigint;
+  try {
+    [recipientLamports, rentExemptMinimum] = await Promise.all([
+      conn.getBalance(recipient, "confirmed").then(BigInt),
+      conn.getMinimumBalanceForRentExemption(0).then(BigInt),
+    ]);
+  } catch {
+    return; // unreadable — proceed as before this check existed
+  }
+  const payout = scaleRaw(amountRaw, route.source.decimals, route.dest.decimals);
+  if (nativePayoutBelowRent({ recipientLamports, payout, rentExemptMinimum })) {
+    const sym = NATIVE_SYMBOL[route.dest.chain];
+    throw new CookieMcpError(
+      `the recipient holds no ${sym} on ${CHAIN_NAME[route.dest.chain]} and ` +
+        `${rawToUi(payout, route.dest.decimals)} ${sym} is below the ` +
+        `${rawToUi(rentExemptMinimum, route.dest.decimals)} ${sym} a new wallet must start with`,
+      "nothing was signed. The delivery would be rejected for leaving the new wallet below rent, " +
+        "on every retry, after this side had already taken your funds. Bridge at least " +
+        `${rawToUi(rentExemptMinimum, route.dest.decimals)} ${sym}, or send to a wallet that already ` +
+        `holds ${sym}.`,
+    );
+  }
+}
+
+// --- Recipient token account (synthetic / collateral destinations) -----------------------------
+// A token delivery credits ATA(recipient, mint). If that account doesn't exist yet, the warp program
+// creates it and pays the rent from its `ata_payer` PDA. That PDA is funded ONCE at deploy time
 // (0.05 SOL by default — about 24 accounts) and is never topped up automatically, so it runs dry. When
 // it can no longer cover one account's rent, delivery to any NEW recipient fails inside the relayer —
 // and because the relayer simulates before submitting, nothing lands on chain, nothing errors, and the
@@ -404,16 +397,15 @@ async function assertDestinationCollateral(
 // recipient's token account by hand. Neither the source-chain simulation nor the collateral preflight
 // above can see it (the escrow was full — it was SOL for rent that was missing, not COOK).
 //
-// So don't depend on that PDA: when the recipient has no COOK account, create it ourselves first, from
-// this wallet, on Solana, and confirm it BEFORE dispatching on Cookie Chain. That is one extra ~0.0021
-// SOL account rent (the recipient can reclaim it by closing the account) in exchange for removing a
-// shared, silently-drainable dependency from the path. It runs first precisely so that a failure here
-// costs nothing: nothing is locked on the source chain yet.
+// So don't depend on that PDA: when the recipient has no token account, create it ourselves first,
+// from this wallet, on the destination chain, and confirm it BEFORE dispatching. That is one extra
+// account rent in the destination's native coin (the recipient can reclaim it by closing the account)
+// in exchange for removing a shared, silently-drainable dependency from the path. It runs first
+// precisely so that a failure here costs nothing: nothing is locked on the source chain yet.
 
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 /** Token-2022 associated accounts carry the ImmutableOwner extension: the 165-byte classic layout plus
- *  a 1-byte account type and a 4-byte extension header. Mainnet COOK is Token-2022, so this is the size
- *  that matters here — 170 bytes ⇒ ~0.00207 SOL of rent, more than a classic ATA. */
+ *  a 1-byte account type and a 4-byte extension header — 170 bytes, more rent than a classic ATA. */
 const ATA_LEN_CLASSIC = 165;
 const ATA_LEN_TOKEN_2022 = 170;
 /** Left spare for the creation tx's own fee (a signature is 5000 lamports; keep room for a retry). */
@@ -434,7 +426,7 @@ export function ataPayerShortfall(args: {
 }
 
 export interface RecipientTokenAccountInfo {
-  /** The recipient's SPL COOK associated token account on Solana. */
+  /** The recipient's associated token account for the bridged token on the destination chain. */
   address: string;
   /** Whether it already existed when the bridge started. */
   exists: boolean;
@@ -446,59 +438,48 @@ export interface RecipientTokenAccountInfo {
 
 interface RecipientAtaRead {
   ata: PublicKey;
-  tokenProgram: PublicKey;
   exists: boolean;
   ataRent: bigint;
   /** What the route's ata_payer is short by; 0n when it can pay, null when not checked. */
   routePayerShortfall: bigint | null;
 }
 
-/** Reads the far side, or null when any part of it is unreadable (missing mint, RPC failure) — an
- *  unknown is reported as unchecked and the bridge proceeds as it did before this check existed. */
+/** Reads the far side, or null when any part of it is unreadable (RPC failure) — an unknown is
+ *  reported as unchecked and the bridge proceeds as it did before this check existed. */
 async function readRecipientAta(
   route: Route,
   recipient: PublicKey,
 ): Promise<RecipientAtaRead | null> {
-  if (route.type !== "native" || !route.destSplMint) return null; // solana→cookie: no account to create
-  const conn = route.destConn;
+  const { dest, destConn: conn } = route;
+  if (dest.type === "native") return null; // paid into the wallet itself: no account to create
   try {
-    // Read the token program from the mint owner — mainnet COOK is Token-2022, and that decides both
-    // the ATA address and its size.
-    const mintInfo = await conn.getAccountInfo(route.destSplMint, "confirmed");
-    if (!mintInfo) return null;
-    const tokenProgram = mintInfo.owner;
-    const ata = getAssociatedTokenAddressSync(route.destSplMint, recipient, true, tokenProgram);
+    const ata = getAssociatedTokenAddressSync(dest.mint!, recipient, true, dest.tokenProgram!);
     const ataInfo = await conn.getAccountInfo(ata, "confirmed");
-    if (ataInfo) {
-      return { ata, tokenProgram, exists: true, ataRent: 0n, routePayerShortfall: null };
-    }
+    if (ataInfo) return { ata, exists: true, ataRent: 0n, routePayerShortfall: null };
 
-    const ataLen = tokenProgram.equals(TOKEN_2022_PROGRAM_ID)
+    const ataLen = dest.tokenProgram!.equals(TOKEN_2022_PROGRAM_ID)
       ? ATA_LEN_TOKEN_2022
       : ATA_LEN_CLASSIC;
     const ataRent = BigInt(await conn.getMinimumBalanceForRentExemption(ataLen));
-    let routePayerShortfall: bigint | null = null;
-    if (route.destAtaPayer) {
-      const [payer, payerReserve] = await Promise.all([
-        conn.getAccountInfo(route.destAtaPayer, "confirmed"),
-        conn.getMinimumBalanceForRentExemption(0),
-      ]);
-      routePayerShortfall = ataPayerShortfall({
-        payerLamports: BigInt(payer?.lamports ?? 0),
-        payerRentReserve: BigInt(payerReserve),
-        ataRent,
-      });
-    }
-    return { ata, tokenProgram, exists: false, ataRent, routePayerShortfall };
+    const [payer, payerReserve] = await Promise.all([
+      conn.getAccountInfo(deriveAtaPayerPda(dest.warp), "confirmed"),
+      conn.getMinimumBalanceForRentExemption(0),
+    ]);
+    const routePayerShortfall = ataPayerShortfall({
+      payerLamports: BigInt(payer?.lamports ?? 0),
+      payerRentReserve: BigInt(payerReserve),
+      ataRent,
+    });
+    return { ata, exists: false, ataRent, routePayerShortfall };
   } catch {
     return null;
   }
 }
 
-/** Creates the recipient's COOK account on Solana if they don't have one, paid by this wallet, and
- *  confirms it before the caller dispatches anything. Returns null when the check couldn't run.
- *  Throws only when the account is missing AND cannot be created — in which case nothing was signed on
- *  the source chain, so the bridge is simply refused. */
+/** Creates the recipient's token account on the destination if they don't have one, paid by this
+ *  wallet, and confirms it before the caller dispatches anything. Returns null when not applicable or
+ *  the check couldn't run. Throws only when the account is missing AND cannot be created — in which
+ *  case nothing was signed on the source chain, so the bridge is simply refused. */
 async function ensureRecipientTokenAccount(
   route: Route,
   recipient: PublicKey,
@@ -519,39 +500,43 @@ async function ensureRecipientTokenAccount(
   }
 
   const base = { address: read.ata.toBase58(), exists: false, routePayerCanFund };
+  const { dest, symbol } = route;
+  const chain = CHAIN_NAME[dest.chain];
+  const native = NATIVE_SYMBOL[dest.chain];
 
   // Opted out of creating it: fall back to leaning on the route's payer, and refuse if it's dry.
   if (!opts.create) {
     if (routePayerCanFund === false) {
       throw new CookieMcpError(
-        `the recipient has no COOK account on Solana and the bridge route cannot pay to create one: ` +
-          `its ATA payer ${route.destAtaPayer!.toBase58()} is short ` +
-          `${rawToUi(read.routePayerShortfall!, 9)} SOL of the ${rawToUi(read.ataRent, 9)} SOL rent`,
+        `the recipient has no ${symbol} account on ${chain} and the bridge route cannot pay to ` +
+          `create one: its ATA payer ${deriveAtaPayerPda(dest.warp).toBase58()} is short ` +
+          `${rawToUi(read.routePayerShortfall!, 9)} ${native} of the ${rawToUi(read.ataRent, 9)} ` +
+          `${native} rent`,
         "nothing was signed. The relayer's delivery would fail in simulation and never reach the " +
-          "chain, so the source transfer would lock your COOK and hang with no error anywhere. Drop " +
-          "createRecipientAccount:false to let this wallet create the account instead (it needs the " +
-          "rent in SOL on Solana), or have the payer PDA topped up.",
+          `chain, so the source transfer would take your ${symbol} and hang with no error anywhere. ` +
+          "Drop createRecipientAccount:false to let this wallet create the account instead (it needs " +
+          `the rent in ${native} on ${chain}), or have the payer PDA topped up.`,
       );
     }
     return { ...base, createdSignature: null };
   }
 
   const conn = route.destConn;
-  const solBalance = BigInt(await conn.getBalance(signer.publicKey, "confirmed"));
+  const balance = BigInt(await conn.getBalance(signer.publicKey, "confirmed"));
   const shortfall = ataPayerShortfall({
-    payerLamports: solBalance,
+    payerLamports: balance,
     payerRentReserve: ATA_CREATE_FEE_BUFFER,
     ataRent: read.ataRent,
   });
   if (shortfall > 0n) {
     throw new CookieMcpError(
-      `the recipient has no COOK account on Solana and this wallet is ${rawToUi(shortfall, 9)} SOL ` +
-        `short of creating one (needs ${rawToUi(read.ataRent, 9)} SOL of rent plus fees, holds ` +
-        `${rawToUi(solBalance, 9)} SOL on Solana)`,
-      "nothing was signed. A cookie-to-solana delivery has to credit an SPL token account, and the " +
-        "recipient doesn't have one — bridging before it exists risks a transfer that locks your COOK " +
-        "and hangs undelivered. Fund this wallet with a little SOL on Solana mainnet, or bridge to an " +
-        "address that already holds COOK there.",
+      `the recipient has no ${symbol} account on ${chain} and this wallet is ` +
+        `${rawToUi(shortfall, 9)} ${native} short of creating one (needs ${rawToUi(read.ataRent, 9)} ` +
+        `${native} of rent plus fees, holds ${rawToUi(balance, 9)} ${native} on ${chain})`,
+      `nothing was signed. A delivery to ${chain} has to credit a token account, and the recipient ` +
+        `doesn't have one — bridging before it exists risks a transfer that takes your ${symbol} and ` +
+        `hangs undelivered. Fund this wallet with a little ${native} on ${chain}, or bridge to an ` +
+        `address that already holds ${symbol} there.`,
     );
   }
 
@@ -560,21 +545,23 @@ async function ensureRecipientTokenAccount(
     signer.publicKey,
     read.ata,
     recipient,
-    route.destSplMint!,
-    read.tokenProgram,
+    dest.mint!,
+    dest.tokenProgram!,
   );
   const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
   const tx = new Transaction({ feePayer: signer.publicKey, blockhash, lastValidBlockHeight }).add(
     createIx,
   );
+  const toCookie = dest.chain === "cookie";
+  const explorerUrl = toCookie ? explorerTxUrl : solanaExplorerTxUrl;
   await signer.signTransaction(tx, {
     what: "recipient-account",
     blockhash,
     lastValidBlockHeight,
-    submit: { via: "solana-rpc" },
+    submit: { via: toCookie ? "cookie-rpc" : "solana-rpc" },
     step: "intermediate",
     summary: {
-      creates: "the recipient's SPL COOK token account on Solana",
+      creates: `the recipient's ${symbol} token account on ${chain}`,
       recipient: recipient.toBase58(),
       tokenAccount: read.ata.toBase58(),
     },
@@ -582,7 +569,7 @@ async function ensureRecipientTokenAccount(
   const signature = await conn.sendRawTransaction(tx.serialize());
   // Confirm before the caller dispatches: the bridge must not go out against an unconfirmed account.
   await confirmSent(conn, { signature, blockhash, lastValidBlockHeight }, "recipient-account", {
-    explorerUrl: solanaExplorerTxUrl(signature),
+    explorerUrl: explorerUrl(signature),
   });
   return { ...base, createdSignature: signature };
 }
@@ -600,7 +587,9 @@ async function isDelivered(
   const processedPda = deriveProcessedMessage(destMailbox, idBytes);
   const info = await conn.getAccountInfo(processedPda, "confirmed");
   if (!info) return { delivered: false, destinationTx: null };
-  const sigs = await conn.getSignaturesForAddress(processedPda, { limit: 1 });
+  // Finding the delivery tx is a nicety; some paid RPC plans refuse this index method, and that must
+  // not turn a delivered transfer into an error.
+  const sigs = await conn.getSignaturesForAddress(processedPda, { limit: 1 }).catch(() => []);
   return { delivered: true, destinationTx: sigs[0]?.signature ?? null };
 }
 
@@ -608,6 +597,8 @@ async function isDelivered(
 
 export interface BridgeResult {
   direction: BridgeDirection;
+  /** The bridged token, with its mint on each side (null = that chain's native coin). */
+  token: { symbol: string; sourceMint: string | null; destinationMint: string | null };
   from: string;
   to: string;
   amount: string;
@@ -617,21 +608,26 @@ export interface BridgeResult {
   destinationDomain: number;
   delivered: boolean;
   destinationTx: string | null;
-  /** Collateral available on the destination when the transfer was signed (UI COOK); null when the
-   *  preflight could not read it. */
+  /** Collateral available on the destination when the transfer was signed (UI amount of the token);
+   *  null when the destination mints the token on delivery (no limit) or it could not be read. */
   destinationCollateral: string | null;
-  /** Cookie→Solana only: the recipient's SPL COOK account, and the tx that created it when this
-   *  bridge had to. null on solana→cookie or when it could not be read. */
+  /** Token destinations: the recipient's token account, and the tx that created it when this bridge
+   *  had to. null when the destination pays the native coin, or it could not be read. */
   recipientTokenAccount: RecipientTokenAccountInfo | null;
+  /** The minimum this transfer was checked against (UI amount of the token, worth MIN_BRIDGE_COOK
+   *  COOK), or null when no price was available and the minimum was skipped. */
+  minimum: { amount: string; worthCook: number; basis: string } | null;
   note: string;
 }
 
 export async function bridge(args: {
+  /** Symbol or mint (either chain) of the token to bridge; defaults to COOK. */
+  token?: string;
   direction: BridgeDirection;
   to?: string;
   amount: string | number;
   waitForDelivery?: boolean;
-  /** cookie-to-solana: create the recipient's SPL COOK account from this wallet when they have none
+  /** Token destinations: create the recipient's token account from this wallet when they have none
    *  (default). Set false to rely on the warp route's own ATA payer instead — which is refused when
    *  that payer is provably dry, since the transfer would hang. */
   createRecipientAccount?: boolean;
@@ -644,7 +640,9 @@ export async function bridge(args: {
   }
   const signer = requireSigner();
   const sender = signer.publicKey;
-  const route = resolveRoute(args.direction);
+  const token = await resolveBridgeToken(args.token ?? "COOK");
+  const route = routeFor(token, args.direction);
+  const { source, dest } = route;
 
   // Recipient on the destination chain. Both chains are SVM and use the same keypair, so default to
   // bridging to your own wallet on the other side.
@@ -661,21 +659,45 @@ export async function bridge(args: {
 
   let amountRaw: bigint;
   try {
-    amountRaw = uiToRaw(args.amount, route.sourceDecimals);
+    amountRaw = uiToRaw(args.amount, source.decimals);
   } catch {
     throw new CookieMcpError(
       `invalid amount "${args.amount}"`,
-      `the source side of this route has ${route.sourceDecimals} decimals`,
+      `${token.symbol} has ${source.decimals} decimals on ${CHAIN_NAME[source.chain]}`,
     );
   }
   if (amountRaw <= 0n) {
     throw new CookieMcpError("amount must be greater than 0", "pass a positive amount");
   }
 
+  // Refuse dust before any preflight or signature, so a rejected call costs nothing.
+  const min = await getBridgeMinimum(token);
+  const minimum = min
+    ? {
+        amount: rawToUi(scaleRaw(min.raw, min.decimals, source.decimals), source.decimals),
+        worthCook: MIN_BRIDGE_COOK,
+        basis: min.basis,
+      }
+    : null;
+  if (min) {
+    const minSource = scaleRaw(min.raw, min.decimals, source.decimals);
+    if (amountRaw < minSource) {
+      throw new CookieMcpError(
+        `${args.amount} ${token.symbol} is below the bridge minimum of ` +
+          `${rawToUi(minSource, source.decimals)} ${token.symbol}`,
+        `the minimum is whatever is worth ${MIN_BRIDGE_COOK.toLocaleString("en-US")} COOK ` +
+          `(${MINIMUM_BASIS_LABEL[min.basis]}). Relay cost is per message, so a smaller transfer ` +
+          `costs more in fees than it moves. Nothing was signed — bridge at least ` +
+          `${rawToUi(minSource, source.decimals)} ${token.symbol}.`,
+      );
+    }
+  }
+
   // Preflight the far side's collateral before anything is signed (see the section above).
   const destinationCollateral = await assertDestinationCollateral(route, amountRaw);
-  // Make sure a first-time recipient actually has somewhere to receive on Solana (see above). Runs
-  // before the dispatch, so a failure here leaves nothing locked.
+  // Make sure a first-time recipient can actually receive (see above). Both run before the dispatch,
+  // so a failure here leaves nothing locked.
+  await assertNativePayoutRentSafe(route, new PublicKey(recipient32), amountRaw);
   const recipientTokenAccount = await ensureRecipientTokenAccount(
     route,
     new PublicKey(recipient32),
@@ -707,7 +729,7 @@ export async function bridge(args: {
     if (sim.value.err) {
       const logs = sim.value.logs ?? [];
       const blob = `${JSON.stringify(sim.value.err)} ${logs.join(" ")}`;
-      if (/BlockhashNotFound|blockhash/i.test(blob) && route.sourceChain === "cookie") {
+      if (/BlockhashNotFound|blockhash/i.test(blob) && source.chain === "cookie") {
         throw new CookieMcpError(
           "bridge simulation failed: blockhash not found",
           "Cookie Chain finalization may be stalled — check chain_health; retry shortly",
@@ -715,9 +737,11 @@ export async function bridge(args: {
       }
       throw new CookieMcpError(
         `bridge simulation failed${logs.length ? `: ${logs.slice(-3).join(" | ")}` : ""}`,
-        route.sourceChain === "solana"
-          ? "check the wallet's SPL COOK balance and that it holds SOL for fees"
-          : "check the wallet's COOK balance (amount + gas + interchain-gas payment)",
+        source.type === "native"
+          ? `check the wallet's ${token.symbol} balance on ${CHAIN_NAME[source.chain]} ` +
+              "(amount + fees + interchain-gas payment)"
+          : `check the wallet's ${token.symbol} balance on ${CHAIN_NAME[source.chain]} and that it ` +
+              `holds ${NATIVE_SYMBOL[source.chain]} for fees and interchain gas`,
       );
     }
   } catch (e) {
@@ -731,8 +755,9 @@ export async function bridge(args: {
     what: "bridge",
     blockhash,
     lastValidBlockHeight,
-    submit: { via: route.sourceChain === "solana" ? "solana-rpc" : "cookie-rpc" },
+    submit: { via: source.chain === "solana" ? "solana-rpc" : "cookie-rpc" },
     summary: {
+      token: token.symbol,
       direction: args.direction,
       amount: String(args.amount),
       recipient: to,
@@ -775,7 +800,7 @@ export async function bridge(args: {
     // especially cookie→solana); a timeout here is NOT a failure — the transfer is still in flight.
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
-      const d = await isDelivered(route.destConn, route.destMailbox, messageId);
+      const d = await isDelivered(route.destConn, dest.mailbox, messageId);
       if (d.delivered) {
         delivered = true;
         destinationTx = d.destinationTx;
@@ -796,6 +821,11 @@ export async function bridge(args: {
 
   return {
     direction: args.direction,
+    token: {
+      symbol: token.symbol,
+      sourceMint: source.mint?.toBase58() ?? null,
+      destinationMint: dest.mint?.toBase58() ?? null,
+    },
     from: sender.toBase58(),
     to,
     amount: String(args.amount),
@@ -807,7 +837,11 @@ export async function bridge(args: {
     destinationTx,
     destinationCollateral,
     recipientTokenAccount,
-    note,
+    minimum,
+    note: minimum
+      ? note
+      : `${note}. No price was available for ${token.symbol}, so the ` +
+        `${MIN_BRIDGE_COOK.toLocaleString("en-US")} COOK minimum was not checked`,
   };
 }
 
@@ -820,17 +854,14 @@ export interface BridgeStatusResult {
 }
 
 /** Check whether a bridged message has been delivered on the destination chain. A read-only lookup
- *  that needs only the destination mailbox — no warp program id / wallet required. */
+ *  that needs only the destination mailbox — the same for every token, so no route or wallet. */
 export async function bridgeStatus(args: {
   messageId: string;
   direction: BridgeDirection;
 }): Promise<BridgeStatusResult> {
   const toSolana = args.direction === "cookie-to-solana";
   const destConn = toSolana ? getSolanaConnection() : getConnection();
-  const destMailbox = parsePk(
-    toSolana ? BRIDGE.solana.mailbox : BRIDGE.cookie.mailbox,
-    "destination mailbox",
-  );
+  const destMailbox = new PublicKey(toSolana ? BRIDGE.solana.mailbox : BRIDGE.cookie.mailbox);
   const { delivered, destinationTx } = await isDelivered(destConn, destMailbox, args.messageId);
   // Destination explorer is the opposite chain's explorer.
   const destExplorer = toSolana ? solanaExplorerTxUrl : explorerTxUrl;

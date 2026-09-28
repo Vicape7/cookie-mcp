@@ -54,7 +54,8 @@ It is a community project for the whole Cookie Chain ecosystem.
 - **Liquid-stake** COOK for bCOOK and redeem it instantly.
 - **Trade NFTs** on [Baked Bazaar](https://bakedbazaar.art) — search, browse, buy, list, and make /
   accept offers (Cookie Chain's Metaplex Auction House marketplace).
-- **Bridge** COOK 1:1 between Cookie Chain and Solana mainnet over [Hyperlane](https://hyperlane.cookiescan.io).
+- **Bridge** COOK, SOL — and any token added to the bridge later — 1:1 between Cookie Chain and
+  Solana mainnet over [Hyperlane](https://hyperlane.cookiescan.io).
 - **Own a name** — register, transfer, and resolve `.cook` names on the
   [CookOven](https://book.cookoven.xyz) name service, and use them anywhere an address is expected
   (`transfer to: "bot.cook"`).
@@ -192,7 +193,8 @@ APY / fees), launchpad reads `get_launchpad_pools` / `get_launchpad_token` /
 `get_launchpad_positions`, and NFT reads
 `get_nft_listings`, `search_nfts` (resolve an NFT/collection name to a listed mint), `get_nft`,
 `get_wallet_nfts`, `get_nft_offers`, `get_nft_market_stats`, and `.cook` name reads
-`resolve_domain` / `get_owned_domains` / `get_domain_listings`.
+`resolve_domain` / `get_owned_domains` / `get_domain_listings`, and `get_bridge_tokens` (what the
+bridge can move).
 
 **Money** (need `COOKIE_PRIVATE_KEY`): `trade` (swap via Cookiebox or Cookiescan), `transfer` (COOK or any token,
 with an optional `memo` written through the SPL Memo program — the way to pay an invoice or payment
@@ -327,27 +329,48 @@ full-range position by default.
 Metaplex Auction House (1% marketplace fee + creator royalties); every action is built and signed
 locally.
 
-**Bridge** (need `COOKIE_PRIVATE_KEY`): `bridge` moves COOK 1:1 between Cookie Chain and Solana mainnet
-over the [Hyperlane](https://hyperlane.cookiescan.io) warp route (`direction` = `cookie-to-solana` |
-`solana-to-cookie`). One source-chain signature dispatches the transfer; a relayer delivers on the far
-side in a few minutes — check with `bridge_status` (a read, by Hyperlane message id). Cookie native COOK
-is 9-decimal; Solana COOK is a 6-decimal Token-2022 mint — amounts are in COOK either way. Simulates
-first, and **preflights the destination's collateral**: the route releases from a fixed collateral
-account on the far side (Cookie's native-collateral PDA / the Solana escrow), and a transfer larger than
-it holds would lock your funds on the source chain behind an undeliverable message — source-chain
-simulation cannot see that, so `bridge` reads the far side and refuses before signing. The result
-reports that collateral as `destinationCollateral`. On `cookie-to-solana` it also makes sure the
-recipient can actually receive: the delivery credits an SPL associated token account, and if the
-recipient has none, `bridge` **creates it from your wallet first** (one extra Solana tx, ~0.0021 SOL of
-account rent, which the recipient can reclaim by closing the account) and confirms it before dispatching
-— so a failure there costs nothing. The warp route can create that account itself, but pays from a PDA
-funded once at deploy time; when it runs dry the relayer's delivery fails _in simulation_, never reaches
-the chain, and the transfer hangs with no error anywhere (this happened on 2026-08-26). Pass
-`createRecipientAccount: false` to rely on that PDA instead — then `bridge` refuses when it is provably
-dry. The result reports the account as `recipientTokenAccount`.
+**Bridge** (need `COOKIE_PRIVATE_KEY`): `bridge` moves a token 1:1 between Cookie Chain and Solana
+mainnet over the [Hyperlane](https://hyperlane.cookiescan.io) warp routes (`token` = a symbol or mint,
+default `COOK`; `direction` = `cookie-to-solana` | `solana-to-cookie`). Today that is **COOK** (native
+COOK on Cookie ⇄ a 6-decimal Token-2022 SPL COOK on Solana) and **SOL** (native SOL on Solana ⇄ a
+synthetic SOL token on Cookie, mint `6tL24Fn75uCMrBSZAvohAq57LSv6KrY6ceEq1wonvucb`). Amounts are in the
+token's own units either way. One source-chain signature dispatches the transfer; a relayer delivers on
+the far side in a few minutes — check with `bridge_status` (a read, by Hyperlane message id).
+
+**New tokens work without an update.** `get_bridge_tokens` and `bridge` don't carry a token list: they
+find every warp program on Cookie Chain owned by the bridge's upgrade authority, read each one's
+Hyperlane token account (route type, mint, decimals, IGP, enrolled Solana router), and accept a route
+only when the Solana program it names is on the Solana mailbox and routes back to it. A token the bridge
+team adds is bridgeable as soon as its route is enrolled; a program anyone else deploys is never listed.
+Discovery is cached for 10 minutes. If the Cookie RPC ever refuses the program listing, the built-in
+COOK and SOL routes are still checked and `get_bridge_tokens` says so in `warnings`.
+
+Simulates first, and **preflights the destination** before signing, because source-chain simulation
+cannot see the far side:
+
+- **Collateral.** A route that releases on the far side (native coin, or an escrow) can only pay out
+  what that account holds; a larger transfer would take your funds behind an undeliverable message.
+  `bridge` refuses it and reports what is there as `destinationCollateral` (null when the destination
+  mints the token instead, like SOL on Cookie).
+- **A native payout to an empty wallet** must reach the rent-exempt minimum, or the delivery is
+  rejected on every retry after your funds are gone. `bridge` refuses anything smaller.
+- **The recipient's token account.** A token delivery credits an associated token account; if the
+  recipient has none, `bridge` **creates it from your wallet first** (one extra tx on the destination,
+  a little of that chain's native coin in rent, reclaimable by closing the account) and confirms it
+  before dispatching — so a failure there costs nothing. The warp route can create it itself, but pays
+  from a PDA funded once at deploy time; when that runs dry the relayer's delivery fails _in
+  simulation_, never reaches the chain, and the transfer hangs with no error anywhere (this happened
+  on 2026-08-26). Pass `createRecipientAccount: false` to rely on that PDA instead — then `bridge`
+  refuses when it is provably dry. The result reports the account as `recipientTokenAccount`.
+
+The bridge website adds a flat fee to its own transfers (0.01 SOL / 15,000 COOK to the relayer). That
+fee is enforced by the site, not by the warp programs, and `bridge` does not add it.
 `get_balance` with `chain: "solana"` shows the Solana side before you bridge — the wallet's SPL
-COOK (what `solana-to-cookie` spends) and its SOL, which pays that transfer's fee and interchain gas;
-that view is COOK + SOL only and does not enumerate other Solana tokens.
+COOK (what `solana-to-cookie` spends), its SOL (the fee and interchain gas, and what a SOL bridge
+spends), and `bridgeTokens`: every other token the bridge can move out of Solana, discovered on-chain
+like the routes. It does not enumerate unrelated Solana tokens. On an RPC that refuses
+`getTokenAccountsByOwner` (Shyft's free plan does), it reads each token's standard account instead and
+adds a warning that tokens held elsewhere aren't counted.
 **Swap on Solana** (`get_quote` / `trade` with `chain: "solana"`): routes **Solana mainnet** liquidity
 through [Jupiter](https://jup.ag) instead of Cookie Chain — how you buy or sell the bridged SPL COOK
 (`36ZrtQoab5MhhySaP1YSTwUahSk6GRVUTtZ6cuVfm9e1`) once it is on the far side. Same non-custodial shape as
@@ -366,9 +389,10 @@ first. Two things to know:
   your slippage cap _fails_. Point `SOLANA_RPC_URL` at a dedicated RPC (a free Helius/Triton/QuickNode
   key is enough).
 
-The mainnet warp-route program ids ship as defaults, so `bridge` works
-out of the box — override `COOKIE_WARP_PROGRAM_ID` / `SOLANA_WARP_PROGRAM_ID` only for a different
-deployment.
+The bridge works out of the box on mainnet. For a different deployment, override the mailboxes
+(`COOKIE_MAILBOX` / `SOLANA_MAILBOX`), the upgrade authority discovery trusts
+(`BRIDGE_COOKIE_UPGRADE_AUTHORITY`; `""` turns discovery off), and add a Cookie warp program to always
+check with `COOKIE_WARP_PROGRAM_ID`. The Solana side and the IGP are read from the routes themselves.
 
 **`.cook` names** ([CookOven](https://book.cookoven.xyz)): `resolve_domain` looks a name up — owner,
 registration date, resolver/metadata pointers — or reports it as available with the live price;

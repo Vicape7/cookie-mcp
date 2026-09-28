@@ -1,9 +1,11 @@
 // get_balance — native COOK + SPL/Token-2022 balances for a wallet, with USD values from the registry.
-import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { PublicKey, LAMPORTS_PER_SOL, type ParsedAccountData } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 
 import { BRIDGE, COOK_MINT, COOK_SYMBOL, COOK_DECIMALS } from "./config";
 import { looksLikeName, resolveWallet } from "./domains";
 import { CookieMcpError } from "./errors";
+import { getBridgeRoutes, type BridgeRoute } from "./bridgeRoutes";
 import { fetchTokens, type CookiescanToken } from "./cookiescan";
 import { getConnection, getSolanaConnection } from "./rpc";
 import { rawToUi } from "./format";
@@ -133,8 +135,46 @@ export interface SolanaBridgeBalances {
   chain: "solana";
   /** SPL COOK (Token-2022, 6 decimals) — the balance `solana-to-cookie` draws from. */
   cook: { amount: string; mint: string; decimals: number; usdValue: number | null };
-  /** Native SOL — pays the tx fee, the ATA rent and the Hyperlane interchain gas payment. */
+  /** Native SOL — pays the tx fee, the ATA rent and the Hyperlane interchain gas payment. It is
+   *  also what the SOL bridge route spends. */
   sol: { amount: string };
+  /** Every other token the bridge can move out of Solana, discovered on-chain — so one added after
+   *  this release shows up here too. Listed even at 0 so the caller sees what is bridgeable. */
+  bridgeTokens: { symbol: string; mint: string; amount: string; decimals: number }[];
+  /** Set when bridge-route discovery failed; `bridgeTokens` is then incomplete. */
+  warnings?: string[];
+}
+
+function warningsField(warnings: string[]): { warnings?: string[] } {
+  return warnings.length ? { warnings } : {};
+}
+
+/** Solana-side mints of the bridge routes that the COOK and SOL fields don't already cover: native
+ *  SOL has no mint, and SPL COOK has its own field. */
+export function solanaBridgeMints(
+  routes: BridgeRoute[],
+): { symbol: string; mint: PublicKey; decimals: number }[] {
+  return routes
+    .filter((r) => r.solana.mint && r.solana.mint.toBase58() !== BRIDGE.solana.splMint)
+    .map((r) => ({ symbol: r.symbol, mint: r.solana.mint!, decimals: r.solana.decimals }));
+}
+
+/** The same, read from the discovered routes; a failed discovery is a warning, not an error. */
+async function otherBridgeMints(): Promise<{
+  mints: { symbol: string; mint: PublicKey; decimals: number }[];
+  warnings: string[];
+}> {
+  try {
+    const { routes, warnings } = await getBridgeRoutes();
+    return { mints: solanaBridgeMints(routes), warnings };
+  } catch (e) {
+    return {
+      mints: [],
+      warnings: [
+        `could not list the bridge's tokens (${(e as Error).message}); showing COOK and SOL only`,
+      ],
+    };
+  }
 }
 
 /** Sum every account holding the mint — a wallet can hold it outside the canonical ATA, and the
@@ -163,18 +203,49 @@ export async function getSolanaBalances(wallet: string): Promise<SolanaBridgeBal
 
   // Query by mint rather than deriving the ATA: a wallet can hold the mint in a non-canonical
   // account, and summing every account is what a sender's spendable balance actually is.
-  const [lamports, accounts, registry] = await Promise.all([
+  // Some RPC plans (e.g. Shyft's free tier) refuse getTokenAccountsByOwner as an "index" method.
+  // Then read the wallet's canonical associated account instead: right for almost every wallet, but
+  // it misses tokens held in any other account, so the result says so.
+  let ownerIndexRefused = false;
+  const heldAmounts = async (m: PublicKey): Promise<ParsedTokenAmount["tokenAmount"][]> => {
+    try {
+      return (await conn.getParsedTokenAccountsByOwner(owner, { mint: m })).value.map(
+        ({ account }) =>
+          (account.data as { parsed: { info: Record<string, unknown> } }).parsed.info
+            .tokenAmount as ParsedTokenAmount["tokenAmount"],
+      );
+    } catch {
+      ownerIndexRefused = true;
+      const mintInfo = await conn.getAccountInfo(m, "confirmed");
+      if (!mintInfo) return [];
+      const ata = getAssociatedTokenAddressSync(m, owner, true, mintInfo.owner);
+      const info = await conn.getParsedAccountInfo(ata, "confirmed");
+      const parsed = (info.value?.data as ParsedAccountData | undefined)?.parsed;
+      const amount = parsed?.info?.tokenAmount as ParsedTokenAmount["tokenAmount"] | undefined;
+      return amount ? [amount] : [];
+    }
+  };
+  const [lamports, cookAmounts, registry, others] = await Promise.all([
     conn.getBalance(owner),
-    conn.getParsedTokenAccountsByOwner(owner, { mint }),
+    heldAmounts(mint),
     fetchTokens(),
+    otherBridgeMints(),
   ]);
-
-  const { raw, decimals } = sumTokenAmounts(
-    accounts.value.map(({ account }) => {
-      const info = (account.data as { parsed: { info: Record<string, unknown> } }).parsed.info;
-      return info.tokenAmount as ParsedTokenAmount["tokenAmount"];
+  const bridgeTokens = await Promise.all(
+    others.mints.map(async (t) => {
+      const held = sumTokenAmounts(await heldAmounts(t.mint));
+      // sumTokenAmounts falls back to COOK's decimals when nothing is held; use the route's.
+      const decimals = held.raw === 0n ? t.decimals : held.decimals;
+      return {
+        symbol: t.symbol,
+        mint: t.mint.toBase58(),
+        amount: rawToUi(held.raw, decimals),
+        decimals,
+      };
     }),
   );
+
+  const { raw, decimals } = sumTokenAmounts(cookAmounts);
 
   const cookPrice = registry.find((t) => t.mint === COOK_MINT)?.price?.usd;
   const price = cookPrice != null ? Number(cookPrice) : NaN;
@@ -189,5 +260,16 @@ export async function getSolanaBalances(wallet: string): Promise<SolanaBridgeBal
       usdValue: Number.isFinite(price) ? Number(amount) * price : null,
     },
     sol: { amount: rawToUi(BigInt(lamports), 9) },
+    bridgeTokens,
+    ...warningsField([
+      ...others.warnings,
+      ...(ownerIndexRefused
+        ? [
+            "this Solana RPC refuses getTokenAccountsByOwner, so only each token's standard " +
+              "(associated) account was read — tokens held in any other account are not counted. " +
+              "Point SOLANA_RPC_URL at an RPC that allows it for a complete balance.",
+          ]
+        : []),
+    ]),
   };
 }

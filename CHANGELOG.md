@@ -2,6 +2,37 @@
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+# Unreleased
+
+### Added
+
+- **Bridge SOL, and any token the bridge adds later.** `bridge` takes `token` (a symbol or either
+  chain's mint; default `COOK`). SOL moves as native SOL on Solana ⇄ a synthetic SOL token on Cookie
+  Chain (`6tL24Fn7…onvucb`). Routes are no longer hardcoded: they are discovered on-chain from the Cookie
+  warp programs owned by the bridge's upgrade authority, and a route is used only when both sides are
+  on the expected mailboxes and route to each other. A token enrolled after this release works without
+  an update.
+- **`get_bridge_tokens`** (no key) lists every bridgeable token with its route type, mint and decimals
+  on each chain.
+- `bridge` refuses a native payout below the rent-exempt minimum into an empty wallet. That delivery
+  would be rejected on every relayer retry after the source side had already taken the funds.
+
+### Changed
+
+- The Solana warp program and the IGP accounts are read from each route's on-chain config, so
+  `SOLANA_WARP_PROGRAM_ID` and the `*_IGP_PROGRAM_ID` / `*_OVERHEAD_IGP_ACCOUNT` variables are gone.
+  `COOKIE_WARP_PROGRAM_ID` still works and adds a Cookie warp program to always check.
+- The recipient-account preflight covers any token destination: SOL arriving on Cookie Chain gets its
+  token account created (paid in COOK) the same way SPL COOK on Solana does.
+
+### Fixed
+
+- `get_balance {chain:"solana"}` failed outright on RPCs that refuse `getTokenAccountsByOwner`
+  (Shyft's free plan). It now reads each token's standard account there and says that tokens held in
+  other accounts are not counted.
+- `bridge_status` and `bridge {waitForDelivery}` no longer fail on a delivered message when the RPC
+  refuses `getSignaturesForAddress` (common on free RPC plans); `destinationTx` is null instead.
+
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
 _September 23, 2026_

@@ -63,6 +63,7 @@ import {
   acceptOffer,
 } from "../core/nft";
 import { bridge, bridgeStatus, type BridgeDirection } from "../core/bridge";
+import { getBridgeTokens } from "../core/bridgeRoutes";
 import {
   buyDomain,
   cancelDomainListing,
@@ -332,7 +333,9 @@ export function createServer(): McpServer {
         "In read-only mode (no key), `wallet` is required. Pass `chain: 'solana'` for the far side of " +
         "the Hyperlane bridge instead: the wallet's SPL COOK on Solana mainnet (what a " +
         "`solana-to-cookie` bridge spends) plus its SOL, which pays that transfer's fee and " +
-        "interchain gas. That view is COOK + SOL only — it does not enumerate other Solana tokens.",
+        "interchain gas (and is what a SOL bridge spends), plus `bridgeTokens`: every other token the " +
+        "bridge can move out of Solana, found on-chain so newly added ones appear too. It does not " +
+        "enumerate unrelated Solana tokens.",
       inputSchema: {
         wallet: z
           .string()
@@ -1547,31 +1550,60 @@ export function createServer(): McpServer {
     tool(async (a: { mint: string; buyer?: string }) => acceptOffer(a)),
   );
 
-  // Bridge — move COOK 1:1 between Cookie Chain and Solana mainnet over the Hyperlane warp route.
-  // One source-chain signature dispatches the transfer; a relayer delivers on the far side in a few
-  // minutes. Requires COOKIE_PRIVATE_KEY and the warp route program ids (COOKIE_WARP_PROGRAM_ID /
-  // SOLANA_WARP_PROGRAM_ID) in the environment.
+  // Bridge — move a token 1:1 between Cookie Chain and Solana mainnet over Hyperlane warp routes.
+  // The routes are discovered on-chain (core/bridgeRoutes.ts), so a token the bridge adds later works
+  // without a release. One source-chain signature dispatches the transfer; a relayer delivers on the
+  // far side in a few minutes.
+  registerTool(
+    "get_bridge_tokens",
+    {
+      title: "List bridgeable tokens (Cookie Chain ⇄ Solana)",
+      description:
+        "List every token the Hyperlane bridge between Cookie Chain and Solana mainnet can move " +
+        "(e.g. COOK, SOL), read live from the chain — a token added to the bridge shows up here as soon " +
+        "as its route is live, with no update to this server. For each: the symbol, and per chain the " +
+        "route type (native coin / minted on arrival / locked in escrow), the mint (null for the chain's " +
+        "native coin) and decimals, plus `minimum`: the smallest amount bridge accepts, worth 15,000 COOK " +
+        "right now. Use it to find the `token` to pass to bridge. No wallet needed.",
+      inputSchema: {},
+    },
+    tool(async () => getBridgeTokens()),
+  );
+
   registerTool(
     "bridge",
     {
-      title: "Bridge COOK (Cookie Chain ⇄ Solana)",
+      title: "Bridge a token (Cookie Chain ⇄ Solana)",
       description:
-        "Bridge COOK 1:1 between Cookie Chain and Solana mainnet via Hyperlane. `direction` is " +
-        "'cookie-to-solana' (locks native COOK on Cookie, credits SPL COOK to the recipient's Solana " +
-        "account) or 'solana-to-cookie' (locks SPL COOK on Solana, credits native COOK on Cookie). " +
-        "`to` is the recipient on the DESTINATION chain (base58; both chains share your keypair, so it " +
-        "defaults to your own wallet). `amount` is a UI amount of COOK. Signs and sends one transaction " +
-        "on the source chain; a relayer delivers on the far side in a few minutes. Simulates first, and " +
-        "preflights the far side before signing: the destination's collateral must cover the release. On " +
-        "cookie-to-solana, if the recipient has no SPL COOK account yet, `bridge` creates it from this " +
-        "wallet first (one extra Solana tx, ~0.0021 SOL of account rent) — the warp route can do this " +
-        "itself but pays from a PDA that runs dry, and when it is dry the delivery fails inside the " +
-        "relayer and the transfer hangs with no error anywhere. " +
-        "Requires COOKIE_PRIVATE_KEY plus COOKIE_WARP_PROGRAM_ID / " +
-        "SOLANA_WARP_PROGRAM_ID. Returns the source tx signature and the Hyperlane message id (use " +
-        "bridge_status to confirm delivery); pass waitForDelivery to poll up to ~3 min inline. A wait " +
-        "that times out is not a failure — the transfer is still in flight; re-check with bridge_status.",
+        "Bridge a token 1:1 between Cookie Chain and Solana mainnet via Hyperlane. `token` is the symbol " +
+        "or mint (default COOK); get_bridge_tokens lists what can be bridged, including tokens added " +
+        "after this server was released. COOK: native COOK on Cookie ⇄ SPL COOK on Solana. SOL: native " +
+        "SOL on Solana ⇄ SOL on Cookie Chain (a token, mint 6tL24Fn7…onvucb — not Cookie's native coin). " +
+        "`direction` is 'cookie-to-solana' or 'solana-to-cookie'. `to` is the recipient on the " +
+        "DESTINATION chain (base58; both chains share your keypair, so it defaults to your own wallet). " +
+        "`amount` is a UI amount of the token, at least the bridge minimum: whatever is worth 15,000 " +
+        "COOK (15,000 COOK itself; SOL priced on Solana via Jupiter; get_bridge_tokens shows each " +
+        "token's current minimum). Signs and sends one transaction on the source chain, paid " +
+        "in that chain's native coin (COOK on Cookie, SOL on Solana) on top of the amount; a relayer " +
+        "delivers on the far side in a few minutes. Simulates first, and preflights the far side before " +
+        "signing: the destination's collateral must cover the release, and a native payout to an empty " +
+        "wallet must reach the rent-exempt minimum. When the recipient has no token account for it on " +
+        "the destination yet, `bridge` creates it from this wallet first (one extra tx, a little native " +
+        "coin of account rent) — the warp route can do this itself but pays from a PDA that runs dry, " +
+        "and when it is dry the delivery fails inside the relayer and the transfer hangs with no error " +
+        "anywhere. Requires COOKIE_PRIVATE_KEY. Returns the source tx signature and the Hyperlane " +
+        "message id (use bridge_status to confirm delivery); pass waitForDelivery to poll up to ~3 min " +
+        "inline. A wait that times out is not a failure — the transfer is still in flight; re-check " +
+        "with bridge_status.",
       inputSchema: {
+        token: z
+          .string()
+          .min(1)
+          .max(44)
+          .optional()
+          .describe(
+            "token to bridge: a symbol (e.g. COOK, SOL) or its mint on either chain; default COOK",
+          ),
         direction: z.enum(["cookie-to-solana", "solana-to-cookie"]).describe("bridge direction"),
         to: z
           .string()
@@ -1583,7 +1615,9 @@ export function createServer(): McpServer {
           ),
         amount: z
           .union([z.number().positive(), z.string()])
-          .describe("UI amount of COOK to bridge, e.g. 5"),
+          .describe(
+            "UI amount of the token to bridge, e.g. 5 — at least the amount worth 15,000 COOK",
+          ),
         waitForDelivery: z
           .boolean()
           .optional()
@@ -1592,7 +1626,7 @@ export function createServer(): McpServer {
           .boolean()
           .optional()
           .describe(
-            "cookie-to-solana: create the recipient's SPL COOK account from this wallet if they have " +
+            "create the recipient's token account on the destination from this wallet if they have " +
               "none (default true). False relies on the warp route's own ATA payer instead, and is " +
               "refused when that payer cannot cover the rent",
           ),
@@ -1600,6 +1634,7 @@ export function createServer(): McpServer {
     },
     tool(
       async (a: {
+        token?: string;
         direction: BridgeDirection;
         to?: string;
         amount: string | number;
@@ -1614,7 +1649,7 @@ export function createServer(): McpServer {
     {
       title: "Bridge delivery status",
       description:
-        "Check whether a bridged COOK transfer has been delivered on the destination chain, by its " +
+        "Check whether a bridged transfer (any token) has been delivered on the destination chain, by its " +
         "Hyperlane message id (returned by `bridge`). `direction` must match the original transfer. " +
         "Returns delivered true/false and the destination-chain delivery tx once relayed. No wallet needed.",
       inputSchema: {

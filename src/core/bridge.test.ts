@@ -10,7 +10,11 @@ import {
   deriveAtaPayerPda,
   ataPayerShortfall,
   scaleRaw,
+  pluginAccountMetas,
+  igpAccountMetas,
+  nativePayoutBelowRent,
 } from "./bridge";
+import type { IgpConfig, RouteSide } from "./bridgeRoutes";
 
 // Devnet warp program ids from hyperlane-cookies (the only committed values); the golden PDAs below
 // were derived from them with the reference seed layout, so they guard the seed strings from drift.
@@ -212,5 +216,102 @@ describe("scaleRaw", () => {
   it("round-trips a large amount through both directions", () => {
     const cookieRaw = 6_999_990_000_000_000n; // 6,999,990 COOK at 9 decimals
     expect(scaleRaw(scaleRaw(cookieRaw, 9, 6), 6, 9)).toBe(cookieRaw);
+  });
+});
+
+describe("pluginAccountMetas (per route type, order + writability)", () => {
+  const sender = new PublicKey("FFWfqNZGQKun8d1iePAnqkrob359Do2qXwV7CqvF4wq2");
+  const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+  const side = (over: Partial<RouteSide>): RouteSide => ({
+    chain: "cookie",
+    warp: new PublicKey("E9zKioziEnQkc3v4pU9zVmVHi9dg6gKoD2qSnzY5sASi"),
+    type: "native",
+    mint: null,
+    tokenProgram: null,
+    decimals: 9,
+    mailbox: new PublicKey("DhiHgUY8Y6mJ4D3MoRnZWAjTBEtSaFFn4CYgc6eDzZ8r"),
+    igp: null,
+    ...over,
+  });
+  const view = (metas: ReturnType<typeof pluginAccountMetas>) =>
+    metas.map((m) => [m.pubkey.toBase58(), m.isWritable]);
+
+  it("native: system program, then the writable native-collateral PDA", () => {
+    const warp = new PublicKey("DWxkDF63gF5pMoAiACjkkYgr4onz4WPZi9wq59gctU6T");
+    expect(view(pluginAccountMetas(side({ warp }), sender))).toEqual([
+      ["11111111111111111111111111111111", false],
+      ["ADLE5sXddiFWpAfExBqjoHNfG8ALRJEhDAtLd5wd6eXe", true],
+    ]);
+  });
+
+  it("synthetic: Token-2022, the writable mint, then the sender's writable ATA — no escrow", () => {
+    const mint = new PublicKey("6tL24Fn75uCMrBSZAvohAq57LSv6KrY6ceEq1wonvucb");
+    const metas = pluginAccountMetas(
+      side({ type: "synthetic", mint, tokenProgram: TOKEN_2022 }),
+      sender,
+    );
+    expect(metas).toHaveLength(3);
+    expect(view(metas).slice(0, 2)).toEqual([
+      [TOKEN_2022.toBase58(), false],
+      [mint.toBase58(), true],
+    ]);
+    expect(metas[2].isWritable).toBe(true);
+  });
+
+  it("collateral: token program, mint, sender ATA, then the escrow PDA", () => {
+    const warp = new PublicKey("B1C91jLcqXYYz57bBWR8dSEjBrJDhWSeNokZ5SDEopu3");
+    const mint = new PublicKey("36ZrtQoab5MhhySaP1YSTwUahSk6GRVUTtZ6cuVfm9e1");
+    const metas = pluginAccountMetas(
+      side({ chain: "solana", warp, type: "collateral", mint, tokenProgram: TOKEN_2022 }),
+      sender,
+    );
+    expect(metas).toHaveLength(4);
+    expect(view(metas)[3]).toEqual(["88q7zoKctwAQRsoTxkMJy95sNE3tntuyEhSrhvR1eZwq", true]);
+  });
+});
+
+describe("igpAccountMetas", () => {
+  const uniqueMsg = new PublicKey("FFWfqNZGQKun8d1iePAnqkrob359Do2qXwV7CqvF4wq2");
+  const program = new PublicKey("F93J1LCWZVZGtiv2yWu1mZeyCbFJNUh9aWEonWN6eSRp");
+  const account = new PublicKey("B47yFLwnEGxp3oFHyy2LdGCmAe6kTbFmzSjkVoFaod9q");
+  const inner = new PublicKey("Aa9wq46NB7qkg1amnBuMRsV1DunmkPHuoRLWZgWiBKdn");
+
+  it("overhead IGP: program, program data, gas payment, the read-only overhead, the writable inner", () => {
+    const igp: IgpConfig = { kind: "overheadIgp", program, account };
+    const metas = igpAccountMetas(igp, uniqueMsg, inner);
+    expect(metas.map((m) => m.isWritable)).toEqual([false, true, true, false, true]);
+    expect(metas[0].pubkey.equals(program)).toBe(true);
+    expect(metas[3].pubkey.equals(account)).toBe(true);
+    expect(metas[4].pubkey.equals(inner)).toBe(true);
+  });
+
+  it("plain IGP: the IGP account itself, writable, and no inner", () => {
+    const metas = igpAccountMetas({ kind: "igp", program, account }, uniqueMsg, null);
+    expect(metas).toHaveLength(4);
+    expect(metas[3].pubkey.equals(account)).toBe(true);
+    expect(metas[3].isWritable).toBe(true);
+  });
+
+  it("no IGP configured: no accounts at all", () => {
+    expect(igpAccountMetas(null, uniqueMsg, null)).toEqual([]);
+  });
+});
+
+describe("nativePayoutBelowRent", () => {
+  const RENT = 890_880n; // rent-exempt minimum of a 0-byte account
+
+  it("refuses a payout below rent into an empty wallet", () => {
+    expect(
+      nativePayoutBelowRent({ recipientLamports: 0n, payout: RENT - 1n, rentExemptMinimum: RENT }),
+    ).toBe(true);
+  });
+
+  it("allows exactly the minimum, and any amount into a wallet that already exists", () => {
+    expect(
+      nativePayoutBelowRent({ recipientLamports: 0n, payout: RENT, rentExemptMinimum: RENT }),
+    ).toBe(false);
+    expect(
+      nativePayoutBelowRent({ recipientLamports: 1_000_000n, payout: 1n, rentExemptMinimum: RENT }),
+    ).toBe(false);
   });
 });

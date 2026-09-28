@@ -148,11 +148,11 @@ export const COOK_TLD = ".cook";
 
 export const HTTP_TIMEOUT_MS = 12_000;
 
-// --- Hyperlane COOK bridge (Cookie Chain ⇄ Solana mainnet) --------------------------------------
-// Moves COOK 1:1 over Hyperlane warp routes: Cookie side is a `native` warp (locks native COOK),
-// Solana side is a `collateral` warp (locks SPL COOK). Addresses below are the mainnet Hyperlane
-// core/IGP identifiers from the hyperlane-cookies deploy (configs/agents/agent-config.json +
-// configs/warp-routes/cookie-sol/token-config.json); all overridable via env.
+// --- Hyperlane bridge (Cookie Chain ⇄ Solana mainnet) -------------------------------------------
+// The routes themselves (COOK, SOL, and any token added later) are discovered on-chain — see
+// bridgeRoutes.ts. What lives here is what that discovery trusts: the two mailboxes, the domain ids,
+// and the upgrade authority that owns every Cookie-side warp program. All overridable via env.
+
 // The public endpoint is heavily throttled and rate-limits `sendTransaction` hardest of all. It is
 // good enough for the bridge (validated) but NOT for a Solana swap, where a slow send against a
 // slippage cap is a FAILED tx, not a slow one — `trade {chain:"solana"}` refuses to run on it.
@@ -185,33 +185,34 @@ export const SOLANA_EXPLORER_URL =
 export const COOKIE_DOMAIN = Number(process.env.COOKIE_DOMAIN?.trim() || "420042004");
 export const SOLANA_DOMAIN = Number(process.env.SOLANA_DOMAIN?.trim() || "1399811149");
 
-// Warp route program IDs (mainnet). Verified against the on-chain collateral accounts published in
-// hyperlane-cookies/defillama/README.md: deriveNativeCollateralPda(cookie warp) ==
-// CL2JoQ5jdTpRNKshWhaTihuooT4qrKdLUiPsqKj3yAKz and deriveEscrowPda(solana warp) ==
-// 88q7zoKctwAQRsoTxkMJy95sNE3tntuyEhSrhvR1eZwq. Overridable via env.
-export const COOKIE_WARP_PROGRAM_ID =
-  process.env.COOKIE_WARP_PROGRAM_ID?.trim() || "Aa9wq46NB7qkg1amnBuMRsV1DunmkPHuoRLWZgWiBKdn";
-export const SOLANA_WARP_PROGRAM_ID =
-  process.env.SOLANA_WARP_PROGRAM_ID?.trim() || "B1C91jLcqXYYz57bBWR8dSEjBrJDhWSeNokZ5SDEopu3";
+// Every Cookie-side warp route program is upgradeable by this account (the Cookie Hyperlane Squads
+// vault — it also owns the mailbox, IGP and ISM). Listing the programs it owns is how a new route is
+// found without a release. Set it to "" to turn discovery off and use only the seeds below.
+export const BRIDGE_COOKIE_UPGRADE_AUTHORITY =
+  process.env.BRIDGE_COOKIE_UPGRADE_AUTHORITY?.trim() ??
+  "G3mm95M4ns7mk8oseWGJnirvgyMahMz3vZEUhdJn8oGX";
+
+// Cookie warp programs always checked, even when the program listing fails: COOK (native) and SOL
+// (synthetic). Their Solana counterparts are read from each program's enrolled router, not listed here.
+// COOKIE_WARP_PROGRAM_ID adds one more (e.g. a route under test). Verified 2026-07-20 (COOK) against
+// the collateral accounts in hyperlane-cookies/defillama/README.md, 2026-09-27 (SOL) against
+// configs/warp-routes/SOL-cookiechain-solanamainnet/program-ids.json.
+export const BRIDGE_COOKIE_WARP_SEEDS: readonly string[] = [
+  "Aa9wq46NB7qkg1amnBuMRsV1DunmkPHuoRLWZgWiBKdn",
+  "E9zKioziEnQkc3v4pU9zVmVHi9dg6gKoD2qSnzY5sASi",
+  ...(process.env.COOKIE_WARP_PROGRAM_ID?.trim()
+    ? [process.env.COOKIE_WARP_PROGRAM_ID.trim()]
+    : []),
+];
 
 export const BRIDGE = {
   cookie: {
     mailbox: process.env.COOKIE_MAILBOX?.trim() || "DhiHgUY8Y6mJ4D3MoRnZWAjTBEtSaFFn4CYgc6eDzZ8r",
-    igpProgramId:
-      process.env.COOKIE_IGP_PROGRAM_ID?.trim() || "F93J1LCWZVZGtiv2yWu1mZeyCbFJNUh9aWEonWN6eSRp",
-    overheadIgp:
-      process.env.COOKIE_OVERHEAD_IGP_ACCOUNT?.trim() ||
-      "B47yFLwnEGxp3oFHyy2LdGCmAe6kTbFmzSjkVoFaod9q",
-    decimals: 9,
   },
   solana: {
     mailbox: process.env.SOLANA_MAILBOX?.trim() || "E588QtVUvresuXq2KoNEwAmoifCzYGpRBdHByN9KQMbi",
-    igpProgramId:
-      process.env.SOLANA_IGP_PROGRAM_ID?.trim() || "BhNcatUDC2D5JTyeaqrdSukiVFsEHK7e3hVmKMztwefv",
-    overheadIgp:
-      process.env.SOLANA_OVERHEAD_IGP_ACCOUNT?.trim() ||
-      "Dg5FAhqNaRfQPc3HwW9fXr7Bj4nrnszoQspoSLgysqfY",
-    // Solana mainnet COOK is a Token-2022 mint with 6 decimals (Cookie native COOK has 9).
+    // Solana mainnet COOK is a Token-2022 mint with 6 decimals (Cookie native COOK has 9). Used by the
+    // Solana balance read and Jupiter; the bridge reads the mint from the route itself.
     splMint: process.env.COOK_SPL_MINT?.trim() || "36ZrtQoab5MhhySaP1YSTwUahSk6GRVUTtZ6cuVfm9e1",
     decimals: 6,
   },
