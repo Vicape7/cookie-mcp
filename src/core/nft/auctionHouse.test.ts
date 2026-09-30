@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { PublicKey } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
 import {
   buildSellIx,
@@ -44,6 +45,15 @@ describe("auction house — golden bytes vs on-chain txs", () => {
       "11111111111111111111111111111111",
       "SysvarRent111111111111111111111111111111111",
     ]);
+  });
+
+  it("public_buy reads the bidder's ATA for the NFT, which make_offer must create first", () => {
+    const buyer = new PublicKey("3ssNbwaSv9KZLVNVYFADGauwYuGKpqAPvCxtACsF1qPy");
+    const nftMint = new PublicKey("Eiwk3BU5WVXAHyXMsFYPQcqNu8AKdwZiFdQqFpuwkSRL");
+    const ix = buildPublicBuyIx({ buyer, nftMint, price: 43000000000000n });
+    expect(ix.keys[4]!.pubkey.toBase58()).toBe(
+      getAssociatedTokenAddressSync(nftMint, buyer, true, TOKEN_PROGRAM_ID).toBase58(),
+    );
   });
 
   it("sell (list) — sig 2cM6oN…", () => {

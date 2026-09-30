@@ -39,6 +39,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   other accounts are not counted.
 - `bridge_status` and `bridge {waitForDelivery}` no longer fail on a delivered message when the RPC
   refuses `getSignaturesForAddress` (common on free RPC plans); `destinationTx` is null instead.
+- `make_offer` failed with Anchor 3012 (`AccountNotInitialized`) whenever the bidder had no token
+  account for the NFT yet — i.e. on almost every first offer. `public_buy` reads that account, so the
+  offer now creates it idempotently first, the way `buy_nft` already does.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
