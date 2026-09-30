@@ -116,9 +116,17 @@ export async function fetchCollectionStats(symbol: string): Promise<BazaarCollec
   );
 }
 
+/** What the indexer is told about a confirmed marketplace transaction, besides its signature. */
+export interface BazaarLog {
+  type: "list" | "cancel-listing" | "buy" | "offer" | "cancel-offer" | "accept-offer";
+  nftMint: string;
+  /** COOK lamports, decimal string. */
+  price?: string;
+}
+
 // Best-effort: tell the indexer about a signed+confirmed tx so listings/offers update without waiting
 // for its own tx scan. Never throws — indexing lag must not fail a successful on-chain action.
-export async function logTransaction(payload: Record<string, unknown>): Promise<void> {
+export async function logTransaction(payload: { signature: string } & BazaarLog): Promise<void> {
   try {
     await fetchJson(`${base()}/log-transaction`, {
       method: "POST",

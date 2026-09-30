@@ -9,6 +9,7 @@ import { confirmTx, submitSignedTx } from "./candyshop";
 import { confirmSent } from "./confirm";
 import { explorerTxUrl, solanaExplorerTxUrl } from "./config";
 import { CookieMcpError } from "./errors";
+import { logTransaction, type BazaarLog } from "./nft/bazaar";
 import { getConnection, getSolanaConnection } from "./rpc";
 import type { AnyTransaction, SubmitRoute } from "./signer";
 
@@ -19,6 +20,8 @@ export interface SubmitSignedArgs {
   lastValidBlockHeight?: number;
   /** The action, for the "sent but unconfirmed" warning; echo `what` from `needs_signature`. */
   what?: string;
+  /** Echo `bazaarLog` from `needs_signature`: reported to the Baked Bazaar indexer once confirmed. */
+  bazaarLog?: BazaarLog;
 }
 
 export interface SubmitSignedResult {
@@ -159,6 +162,10 @@ export async function submitSignedTransaction(args: SubmitSignedArgs): Promise<S
   let messageId: string | null | undefined;
   if (args.what === "bridge" && confirmed) {
     messageId = await bridgeMessageId(conn, signature);
+  }
+  // The NFT tool would have told the indexer after its own confirm; do the same here.
+  if (args.bazaarLog && confirmed) {
+    await logTransaction({ signature, ...args.bazaarLog });
   }
   return {
     signature,

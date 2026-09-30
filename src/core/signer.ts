@@ -15,6 +15,7 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/w
 import bs58 from "bs58";
 
 import type { ProvidedSignature } from "./context";
+import type { BazaarLog } from "./nft/bazaar";
 
 /** Where a signed transaction must go. Mirrors the send paths the tools use themselves. */
 export type SubmitRoute =
@@ -41,6 +42,11 @@ export interface SignContext {
   step?: "final" | "intermediate";
   /** Agent-facing description of what the transaction does, echoed back in `needs_signature`. */
   summary?: Record<string, unknown>;
+  /**
+   * A Baked Bazaar trade: what to report to its indexer once the transaction confirms. A local signer
+   * reports it itself; an external one echoes it so `submit_signed_tx` can report it instead.
+   */
+  bazaarLog?: BazaarLog;
 }
 
 export type AnyTransaction = Transaction | VersionedTransaction;
@@ -121,6 +127,8 @@ export type NeedsSignature =
       submit: SubmitRoute;
       step: "final" | "intermediate";
       summary?: Record<string, unknown>;
+      /** Pass back to `submit_signed_tx` unchanged; it tells the marketplace indexer after confirming. */
+      bazaarLog?: BazaarLog;
       next: string;
     }
   | {
@@ -177,12 +185,15 @@ export class ExternalSigner implements TxSigner {
       submit: ctx.submit,
       step,
       ...(ctx.summary ? { summary: ctx.summary } : {}),
+      ...(ctx.bazaarLog ? { bazaarLog: ctx.bazaarLog } : {}),
       next:
         `sign transactionBase64 with wallet ${this.publicKey.toBase58()} (do not modify it — any ` +
         `co-signatures would break; it was simulated, and its effect on this wallet checked against ` +
         `the request, which is what \`summary\` describes — let the wallet show the user what it ` +
         `does before they approve), then call submit_signed_tx with the signed ` +
-        `bytes and the same submit/blockhash/lastValidBlockHeight fields` +
+        `bytes and the same submit/blockhash/lastValidBlockHeight` +
+        (ctx.bazaarLog ? `/bazaarLog` : ``) +
+        ` fields` +
         (step === "intermediate"
           ? `. This is a prerequisite step: once it confirms, call the same tool again with the same ` +
             `arguments to continue.`
