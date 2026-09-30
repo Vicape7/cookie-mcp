@@ -30,7 +30,7 @@ import {
   createSyncNativeInstruction,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import {
   ComputeBudgetProgram,
@@ -95,7 +95,7 @@ export const APPROVE_POSITION_SALE_DISCRIMINATOR = Uint8Array.from([
 /** Wrap shortfall + opt-in + placement, or ATA create + approve: both well under this. */
 const CURVE_PLACE_COMPUTE_UNITS = 200_000;
 
-const ixCoder = new anchorPkg.BorshInstructionCoder(limitOrderIdl as Idl);
+const ixCoder = new BorshInstructionCoder(limitOrderIdl as Idl);
 
 // --- PDAs (golden-tested against cookiebox's derivations) ------------------------------------------
 

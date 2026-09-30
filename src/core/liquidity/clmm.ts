@@ -21,7 +21,12 @@ import {
   TOKEN_2022_PROGRAM_ID,
   unpackMint,
 } from "@solana/spl-token";
-import anchorPkg, { type Idl, type Program } from "@coral-xyz/anchor";
+import {
+  AnchorProvider,
+  Program as AnchorProgram,
+  type Idl,
+  type Program,
+} from "@coral-xyz/anchor";
 import BN from "bn.js";
 import Decimal from "decimal.js";
 import {
@@ -50,8 +55,6 @@ import { uiToRaw } from "../format";
 import { signSendConfirm, LP_NOTE } from "./send";
 import { anchorWalletFor, type TxSigner } from "../signer";
 import whirlpoolIdl from "../../idl/whirlpool.json" with { type: "json" };
-
-const { AnchorProvider } = anchorPkg;
 
 export const CLMM_PROGRAM_ID = new PublicKey("CLMMmWqTtyNSomqXP3kETJy2SGKPdr31USsm4GfbLyKs");
 
@@ -95,7 +98,7 @@ export function buildClmmClient(conn: Connection, signer: TxSigner): WhirlpoolCl
   // our own simulate-first sender below, never through `provider.sendAndConfirm`.
   const wallet = anchorWalletFor(signer, { what: "liquidity", submit: { via: "cookie-rpc" } });
   const provider = new AnchorProvider(conn, wallet as never, { commitment: "confirmed" });
-  const program = new anchorPkg.Program(
+  const program = new AnchorProgram(
     { ...(whirlpoolIdl as Idl), address: CLMM_PROGRAM_ID.toBase58() },
     provider,
   ) as unknown as Program;

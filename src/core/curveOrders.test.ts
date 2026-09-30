@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   ComputeBudgetProgram,
@@ -206,7 +206,7 @@ describe("buildEnableBuyForIx", () => {
 // --- The curve-buy placement, run through the same verifier as an aggregator build ------------------
 
 describe("curve-buy placement passes assertPlaceTxTrustworthy — and tampering does not", () => {
-  const coder = new anchorPkg.BorshInstructionCoder(limitOrderIdl as Idl);
+  const coder = new BorshInstructionCoder(limitOrderIdl as Idl);
   const owner = Keypair.generate();
   const base = Keypair.generate();
   const cook = new PublicKey(COOK_MINT);

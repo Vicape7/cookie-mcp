@@ -13,7 +13,7 @@
 // admin-tunable on the on-chain `Fee` singleton, so it is read live and never hardcoded). The taker
 // fee is paid by the filler on top of the maker's price and is 0 while the only filler is the
 // Cookiebox keeper.
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import {
   ComputeBudgetProgram,
@@ -71,7 +71,7 @@ if (idlAddress !== PROGRAM_IDS.limitOrder) {
   );
 }
 
-const ixCoder = new anchorPkg.BorshInstructionCoder(limitOrderIdl as Idl);
+const ixCoder = new BorshInstructionCoder(limitOrderIdl as Idl);
 
 /** On-chain `Order.kind`. */
 export const ORDER_KIND_LIMIT = 0;

@@ -42,6 +42,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `make_offer` failed with Anchor 3012 (`AccountNotInitialized`) whenever the bidder had no token
   account for the NFT yet — i.e. on almost every first offer. `public_buy` reads that account, so the
   offer now creates it idempotently first, the way `buy_nft` already does.
+- The library failed to bundle for edge runtimes and browsers (Cloudflare Workers, Vercel Edge):
+  Anchor was default-imported, and its browser build — picked under the `workerd` / `browser`
+  conditions — has no default export and no `Wallet`. It is now imported by name.
 
 ### Security
 
