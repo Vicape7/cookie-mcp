@@ -23,6 +23,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   holds on what arrives. It then holds the build to those numbers and reports `input.escrowed`.
   Live once the upgraded limit-order and DCA programs are deployed and the aggregator's
   `transferFeeMints` flags are on. Until then the aggregator refuses these pairs with a 422.
+- **Per-domain library entries.** `cookie-mcp/trade`, `/transfer`, `/stake`, `/bridge`,
+  `/bridge-routes`, `/nft`, `/domains`, `/launchpad`, `/limit-orders`, `/dca`, `/liquidity`, `/quote`,
+  `/balances`, `/signer`, `/context`, `/submit` and `/errors`, so an app that needs one flow does not
+  bundle every venue SDK: `trade` alone is ~100 KB gzipped against ~450 KB for the barrel. They share
+  state with the barrel. A unit test bundles the barrel and every entry under the `workerd` conditions
+  and checks `exports` against the build.
 
 ### Changed
 

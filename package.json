@@ -42,6 +42,74 @@
       "types": "./dist/mcp/createServer.d.ts",
       "import": "./dist/mcp/createServer.js"
     },
+    "./signer": {
+      "types": "./dist/lib/signer.d.ts",
+      "import": "./dist/lib/signer.js"
+    },
+    "./context": {
+      "types": "./dist/lib/context.d.ts",
+      "import": "./dist/lib/context.js"
+    },
+    "./submit": {
+      "types": "./dist/lib/submit.d.ts",
+      "import": "./dist/lib/submit.js"
+    },
+    "./errors": {
+      "types": "./dist/lib/errors.d.ts",
+      "import": "./dist/lib/errors.js"
+    },
+    "./quote": {
+      "types": "./dist/lib/quote.d.ts",
+      "import": "./dist/lib/quote.js"
+    },
+    "./balances": {
+      "types": "./dist/lib/balances.d.ts",
+      "import": "./dist/lib/balances.js"
+    },
+    "./trade": {
+      "types": "./dist/lib/trade.d.ts",
+      "import": "./dist/lib/trade.js"
+    },
+    "./transfer": {
+      "types": "./dist/lib/transfer.d.ts",
+      "import": "./dist/lib/transfer.js"
+    },
+    "./stake": {
+      "types": "./dist/lib/stake.d.ts",
+      "import": "./dist/lib/stake.js"
+    },
+    "./bridge": {
+      "types": "./dist/lib/bridge.d.ts",
+      "import": "./dist/lib/bridge.js"
+    },
+    "./bridge-routes": {
+      "types": "./dist/lib/bridge-routes.d.ts",
+      "import": "./dist/lib/bridge-routes.js"
+    },
+    "./limit-orders": {
+      "types": "./dist/lib/limit-orders.d.ts",
+      "import": "./dist/lib/limit-orders.js"
+    },
+    "./dca": {
+      "types": "./dist/lib/dca.d.ts",
+      "import": "./dist/lib/dca.js"
+    },
+    "./liquidity": {
+      "types": "./dist/lib/liquidity.d.ts",
+      "import": "./dist/lib/liquidity.js"
+    },
+    "./nft": {
+      "types": "./dist/lib/nft.d.ts",
+      "import": "./dist/lib/nft.js"
+    },
+    "./domains": {
+      "types": "./dist/lib/domains.d.ts",
+      "import": "./dist/lib/domains.js"
+    },
+    "./launchpad": {
+      "types": "./dist/lib/launchpad.d.ts",
+      "import": "./dist/lib/launchpad.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -80,6 +148,7 @@
     "@eslint/js": "^9.17.0",
     "@types/bn.js": "^5.1.6",
     "@types/node": "^22.10.0",
+    "esbuild": "^0.27.0",
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^9.1.0",
     "globals": "^15.14.0",
