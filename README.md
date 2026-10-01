@@ -513,6 +513,25 @@ Money functions resolve their signer from `COOKIE_SIGNER` + the request context
 (`runWithRequestContext({ wallet }, () => transfer({...}))`) and throw `SignatureRequired` with the
 same payload the tool returns. Local agents (`COOKIE_PRIVATE_KEY`, stdio) are unaffected by any of this.
 
+Each domain is also its own entry, so an app that needs one flow does not bundle every venue SDK the
+barrel pulls in: `cookie-mcp/trade`, `/transfer`, `/stake`, `/bridge`, `/bridge-routes`, `/nft`,
+`/domains`, `/launchpad`, `/limit-orders`, `/dca`, `/liquidity`, `/quote`, `/balances`, plus
+`/signer`, `/context`, `/submit` and `/errors`. They share state with the barrel (one request context,
+one wallet cache), so mixing them is safe.
+
+```ts
+import { trade } from "cookie-mcp/trade"; // ~100 KB gzipped, against ~450 KB for the barrel
+import { runWithRequestContext } from "cookie-mcp/context";
+import { SignatureRequired } from "cookie-mcp/signer";
+```
+
+The library also bundles for edge runtimes (Cloudflare Workers, Vercel Edge). On Workers enable
+`nodejs_compat` (for `AsyncLocalStorage`, `node:net`, `node:dns`) and make sure your variables reach
+`process.env` — configuration is read from it at import time — which is the default from compatibility
+date `2025-04-01`, or the `nodejs_compat_populate_process_env` flag before that. `deploy_token`'s
+`imageUrl` fetch goes over `node:https`, which Workers provide from compatibility date `2025-08-15`
+(or `enable_nodejs_http_modules`); on an older date pass `imageBase64` instead.
+
 ## Safety
 
 Non-custodial: no remote key storage. With a local key it stays in `COOKIE_PRIVATE_KEY`, signs locally,
@@ -526,7 +545,7 @@ sent (or handed out for signing).
 yarn install
 yarn test    # lint + format + typecheck + unit tests + boot smoke
 yarn mcp     # run the server on stdio from source (tsx)
-yarn build   # bundle to dist/ (CLI, `cookie-mcp/server` factory, `cookie-mcp` library)
+yarn build   # bundle to dist/ (CLI, `cookie-mcp/server` factory, `cookie-mcp` library + subpaths)
 ```
 
 To point an agent at a local checkout instead of the published package, set the command to

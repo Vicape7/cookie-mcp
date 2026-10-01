@@ -16,7 +16,7 @@
 // Fees: each cycle pays the user its proceeds minus the DCA program's own maker fee (10 bps at
 // launch, 3 on a stable pair), read live off its `Fee` singleton and reported as `makerFeeBps`.
 // The taker fee is 0.
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey, VersionedTransaction, type MessageV0 } from "@solana/web3.js";
 
@@ -73,7 +73,7 @@ if (idlAddress !== PROGRAM_IDS.dca) {
   );
 }
 
-const ixCoder = new anchorPkg.BorshInstructionCoder(dcaIdl as Idl);
+const ixCoder = new BorshInstructionCoder(dcaIdl as Idl);
 
 /** Schedule bounds the program enforces at `open_dca` (`programs/dca/src/constants.rs`). */
 export const MIN_CYCLE_FREQUENCY = 60;

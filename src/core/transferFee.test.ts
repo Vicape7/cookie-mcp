@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import {
   TOKEN_2022_PROGRAM_ID,
@@ -149,7 +149,7 @@ describe("harvestIxMatcher", () => {
 
 // --- limit orders on a taxed mint -----------------------------------------------------------------
 
-const loCoder = new anchorPkg.BorshInstructionCoder(limitOrderIdl as Idl);
+const loCoder = new BorshInstructionCoder(limitOrderIdl as Idl);
 const order = orderPda(base.publicKey);
 
 function placeIx(makerInput = taxedAta): TransactionInstruction {
@@ -281,7 +281,7 @@ describe("assertCancelTxTrustworthy on a transfer-fee input", () => {
 
 // --- DCA on a taxed mint --------------------------------------------------------------------------
 
-const dcaCoder = new anchorPkg.BorshInstructionCoder(dcaIdl as Idl);
+const dcaCoder = new BorshInstructionCoder(dcaIdl as Idl);
 const dca = dcaPda(base.publicKey);
 const sized = resizeForTaxedDeposit(
   {

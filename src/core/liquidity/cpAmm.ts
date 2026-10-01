@@ -17,7 +17,12 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
-import anchorPkg, { type Idl, type Program } from "@coral-xyz/anchor";
+import {
+  AnchorProvider,
+  Program as AnchorProgram,
+  type Idl,
+  type Program,
+} from "@coral-xyz/anchor";
 import BN from "bn.js";
 import { CpAmm } from "@meteora-ag/cp-amm-sdk";
 import {
@@ -31,8 +36,6 @@ import {
 } from "@solana/spl-token";
 
 import cpAmmIdl from "../../idl/cp_amm.json" with { type: "json" };
-
-const { AnchorProvider, Wallet } = anchorPkg;
 
 export const CP_AMM_PROGRAM_ID = new PublicKey("DAMMjDCEFTDkt7ywazZS8GoaLtjb3HaJo3pLbf64xrPY");
 
@@ -96,12 +99,21 @@ export interface CpAmmDeps {
   poolAuthority: PublicKey;
 }
 
-// The provider wallet is a throwaway keypair — we build txs and sign them ourselves.
+// The provider wallet is a throwaway keypair — we build txs and sign them ourselves. A plain object
+// rather than anchor's `Wallet` class, which only exists in its Node build.
+function throwawayWallet(): ConstructorParameters<typeof AnchorProvider>[1] {
+  return {
+    publicKey: Keypair.generate().publicKey,
+    signTransaction: () => Promise.reject(new Error("the cp-amm provider wallet never signs")),
+    signAllTransactions: () => Promise.reject(new Error("the cp-amm provider wallet never signs")),
+  };
+}
+
 export function buildCpAmmDeps(connection: Connection): CpAmmDeps {
-  const provider = new AnchorProvider(connection, new Wallet(Keypair.generate()), {
+  const provider = new AnchorProvider(connection, throwawayWallet(), {
     commitment: "confirmed",
   });
-  const program = new anchorPkg.Program(
+  const program = new AnchorProgram(
     { ...(cpAmmIdl as Idl), address: CP_AMM_PROGRAM_ID.toBase58() },
     provider,
   ) as unknown as Program;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import anchorPkg, { type Idl } from "@coral-xyz/anchor";
+import { BorshInstructionCoder, type Idl } from "@coral-xyz/anchor";
 import BN from "bn.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -39,7 +39,7 @@ import {
 
 const COOK = new PublicKey(COOK_MINT);
 const MON = new PublicKey("6H7xnYfBFeEU8S8mhrZRkFNS5vEegRqEwv7h42WbntCL");
-const coder = new anchorPkg.BorshInstructionCoder(dcaIdl as Idl);
+const coder = new BorshInstructionCoder(dcaIdl as Idl);
 
 const owner = Keypair.generate();
 const base = Keypair.generate();
