@@ -47,6 +47,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   through a hosted server, anyone naming that wallet could build launches on its session. Each
   `deploy_token` in external mode now needs its own `loginSignature`. The local-key cache is
   unchanged.
+- `get_wallet` and `chain_health` report the RPC as its origin only. A keyed `COOKIE_RPC_URL`
+  (`?api-key=…`, `/v2/<key>`) used to be returned verbatim to every caller, and over HTTP that means
+  anyone who can reach the port. Error messages that echo the Cookie Chain or Solana RPC URL are cut
+  back the same way.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 

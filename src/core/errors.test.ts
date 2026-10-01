@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 
+import { redactUrl } from "./config";
 import { CookieMcpError, redact, toToolError } from "./errors";
 
 describe("redact", () => {
@@ -16,6 +17,31 @@ describe("redact", () => {
   it("leaves short base58 (pubkeys) alone", () => {
     const pk = "So11111111111111111111111111111111111111112";
     expect(redact(pk)).toBe(pk);
+  });
+  it("cuts a keyed RPC URL back to its origin wherever it is echoed", () => {
+    const rpc = "https://mainnet.helius-rpc.com/?api-key=0f1e2d3c-secret";
+    const msg = redact(`failed to get info from ${rpc}: 429`, [rpc]);
+    expect(msg).toBe("failed to get info from https://mainnet.helius-rpc.com/[redacted]: 429");
+    expect(msg).not.toContain("secret");
+  });
+});
+
+describe("redactUrl", () => {
+  it("keeps a bare origin as is", () => {
+    expect(redactUrl("https://rpc.cookiescan.io")).toBe("https://rpc.cookiescan.io");
+    expect(redactUrl("https://rpc.cookiescan.io/")).toBe("https://rpc.cookiescan.io");
+  });
+  it("drops a query, a path key and userinfo", () => {
+    expect(redactUrl("https://x.example/?api-key=abc")).toBe("https://x.example/[redacted]");
+    expect(redactUrl("https://x.example/v2/abcdef0123456789")).toBe("https://x.example/[redacted]");
+    expect(redactUrl("https://user:pass@x.example")).toBe("https://x.example/[redacted]");
+  });
+  it("never echoes something it cannot parse", () => {
+    expect(redactUrl("not a url ?key=abc")).toBe("[unparseable URL]");
+    // An opaque-origin scheme never prints as the literal "null".
+    expect(redactUrl("ws+unix://rpc.example/sock?key=abc")).toBe(
+      "ws+unix://rpc.example/[redacted]",
+    );
   });
 });
 

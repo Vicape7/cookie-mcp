@@ -12,7 +12,7 @@ import {
   walletInfo,
   _resetWalletCache,
 } from "./wallet";
-import { COOKIE_RPC_URL } from "./config";
+import { COOKIE_RPC_URL, redactUrl } from "./config";
 import { runWithRequestContext } from "./context";
 import { CookieMcpError } from "./errors";
 
@@ -96,7 +96,7 @@ describe("getSigner — external mode", () => {
       wallet: pk,
       readOnly: false,
       signer: "external",
-      rpcUrl: COOKIE_RPC_URL,
+      rpcUrl: redactUrl(COOKIE_RPC_URL),
     });
   });
 
@@ -126,7 +126,12 @@ describe("walletInfo", () => {
     const secret = bs58.encode(kp.secretKey);
     process.env.COOKIE_PRIVATE_KEY = secret;
     const info = walletInfo();
-    expect(info).toEqual({ wallet: pk, readOnly: false, signer: "local", rpcUrl: COOKIE_RPC_URL });
+    expect(info).toEqual({
+      wallet: pk,
+      readOnly: false,
+      signer: "local",
+      rpcUrl: redactUrl(COOKIE_RPC_URL),
+    });
     expect(JSON.stringify(info)).not.toContain(secret);
   });
 
@@ -136,7 +141,7 @@ describe("walletInfo", () => {
       wallet: null,
       readOnly: true,
       signer: "local",
-      rpcUrl: COOKIE_RPC_URL,
+      rpcUrl: redactUrl(COOKIE_RPC_URL),
     });
   });
 

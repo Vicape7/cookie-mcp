@@ -1,4 +1,5 @@
 // Every tool failure returns { error, hint } — never a stack trace, never a secret.
+import { COOKIE_RPC_URL, SOLANA_RPC_URL, redactUrl } from "./config";
 
 export type ToolError = {
   error: string;
@@ -15,9 +16,16 @@ export class CookieMcpError extends Error {
 }
 
 // Strip anything shaped like a private key: keygen JSON byte arrays and long (>=80 char) base58 runs
-// (full secret keys). Pubkeys/signatures are shorter and left intact.
-export function redact(text: string): string {
-  return text
+// (full secret keys). Pubkeys/signatures are shorter and left intact. The configured RPC URLs are
+// cut back to their origin too: web3.js echoes the endpoint in its fetch errors, and the operator's
+// API key is often part of it.
+export function redact(text: string, rpcUrls: string[] = [COOKIE_RPC_URL, SOLANA_RPC_URL]): string {
+  let out = text;
+  for (const url of rpcUrls) {
+    const shown = redactUrl(url);
+    if (shown !== url && url) out = out.split(url).join(shown);
+  }
+  return out
     .replace(/\[\s*(?:\d{1,3}\s*,\s*){31,}\d{1,3}\s*\]/g, "[REDACTED_KEYPAIR]")
     .replace(/[1-9A-HJ-NP-Za-km-z]{80,}/g, "[REDACTED]");
 }

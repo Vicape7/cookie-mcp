@@ -13,7 +13,7 @@ import path from "node:path";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 
-import { COOKIE_RPC_URL } from "./config";
+import { COOKIE_RPC_URL, redactUrl } from "./config";
 import { requestContext } from "./context";
 import { CookieMcpError } from "./errors";
 import { ExternalSigner, LocalKeypairSigner, type TxSigner } from "./signer";
@@ -144,7 +144,12 @@ export function walletInfo(): {
   rpcUrl: string;
 } {
   const wallet = ownPublicKey();
-  return { wallet, readOnly: wallet === null, signer: signerMode(), rpcUrl: COOKIE_RPC_URL };
+  return {
+    wallet,
+    readOnly: wallet === null,
+    signer: signerMode(),
+    rpcUrl: redactUrl(COOKIE_RPC_URL),
+  };
 }
 
 export function _resetWalletCache(): void {
