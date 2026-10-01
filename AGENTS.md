@@ -13,7 +13,8 @@ src/
   core/                # all logic lives here — pure, testable, framework-agnostic
     config.ts          #   constants, program IDs, endpoints
     rpc.ts             #   getConnection()
-    wallet.ts          #   key loading, requireWallet(), assertWithinSpendCap()
+    wallet.ts          #   key loading, signer resolution: requireSigner() / getSigner()
+    spendGuard.ts      #   hold an API-built tx's simulated effect on our wallet to the request
     errors.ts          #   CookieMcpError — the one error type surfaced to agents
     format.ts          #   rawToUi / uiToRaw / shortAddr — always go through these
     http.ts            #   fetchJson with retry policy
@@ -67,12 +68,18 @@ No key needed for read-only work: `npx tsx scripts/smoke-cores.ts` hits live poo
 - **Amounts:** convert at the boundary with `rawToUi` / `uiToRaw`; never hand-roll decimal math.
 - **Safety (non-negotiable):**
   - read-only until `COOKIE_PRIVATE_KEY` is set; reads must not require a key.
-  - every money-moving action calls `assertWithinSpendCap()` and **simulates before send**.
+  - every money-moving action **simulates before send**. There is no spend cap (it was removed in
+    0.6.0), so nothing bounds a loss except what the tool itself checks.
+  - a transaction a venue API built is never trusted for its simulation alone: escrow builds are
+    decoded instruction by instruction (`txVerify.ts`), and swap and launchpad builds go through
+    `simulateWithinBudget` (`spendGuard.ts`), which refuses a build that takes more than the request
+    from the wallet or changes who controls one of its accounts.
   - never log or embed secrets; never put a token in a remote URL.
 - **HTTP:** use `fetchJson` (it has the retry policy), not bare `fetch`.
 - **Venue APIs that build transactions** (Candy Shop swaps, the MomoSwap launchpad) hand back a
-  base64 transaction: deserialize it, **simulate on our RPC**, sign locally, then send. Never let a
-  venue submit on our behalf and never send an unsimulated build.
+  base64 transaction: deserialize it, **simulate on our RPC through `simulateWithinBudget`** with a
+  budget for exactly what the user asked to spend, sign locally, then send. Never let a venue submit
+  on our behalf, and never send an unsimulated or unbudgeted build.
 - **Formatting:** Prettier + ESLint are enforced by `yarn test`; run `yarn format` before committing.
 
 ## Testing

@@ -24,6 +24,13 @@ import type { CandyShopMultiRoute } from "./candyshop";
 // The build call re-quotes and runs a server-side simulation, so give it more headroom than a quote.
 const SWAP_TX_TIMEOUT_MS = 30_000;
 
+/**
+ * The most priority fee a Jupiter build may attach (0.005 SOL). Sent as the cap in the swap request
+ * and used by the spend guard as the ceiling on the fee the build may actually take: the response's
+ * `prioritizationFeeLamports` comes from the API, so it cannot be allowed to widen its own budget.
+ */
+export const JUPITER_MAX_PRIORITY_FEE_LAMPORTS = 5_000_000;
+
 function headers(): Record<string, string> {
   return JUPITER_API_KEY ? { "x-api-key": JUPITER_API_KEY } : {};
 }
@@ -222,6 +229,12 @@ export async function buildJupSwapTx(args: { quote: JupQuote; owner: string }): 
       // Wrap/unwrap SOL automatically so a plain SOL balance can buy, and a sale lands as SOL.
       wrapAndUnwrapSol: true,
       dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: {
+        priorityLevelWithMaxLamports: {
+          maxLamports: JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+          priorityLevel: "medium",
+        },
+      },
     }),
     timeoutMs: SWAP_TX_TIMEOUT_MS,
   });

@@ -40,6 +40,12 @@ import { rawToUi, uiToRaw } from "../format";
 import { fetchRemoteImage } from "../imageFetch";
 import { assertLocalFilesAllowed, readImageFile } from "../imageFile";
 import { getConnection } from "../rpc";
+import {
+  LAUNCH_RENT_ALLOWANCE,
+  nativeBudget,
+  simulateWithinBudget,
+  type SpendBudget,
+} from "../spendGuard";
 import { ownPublicKey, requireSigner } from "../wallet";
 import type { TxSigner } from "../signer";
 import { withProvidedSignatures, type ProvidedSignature } from "../context";
@@ -493,6 +499,8 @@ async function submitBuilt(
   built: BuiltTx,
   signer: TxSigner,
   what: string,
+  /** What this action may take from the wallet — the API's build is held to it (see spendGuard). */
+  budget: SpendBudget,
   codeHints?: Record<number, SimCodeHint>,
   summary?: Record<string, unknown>,
 ): Promise<string> {
@@ -531,10 +539,14 @@ async function submitBuilt(
   // `recentBlockhash` with a fresh one before simulating, the versioned one simulates the message as
   // given (and so needs the API's blockhash to still be valid). `assertBlockhashUsable` below covers
   // both, but for the versioned path it is load-bearing rather than belt-and-braces.
-  const sim =
-    tx instanceof VersionedTransaction
-      ? await conn.simulateTransaction(tx, { replaceRecentBlockhash: true, sigVerify: false })
-      : await conn.simulateTransaction(tx);
+  //
+  // The simulation also returns the post-state of every account we own that the build touches, and
+  // `simulateWithinBudget` refuses a build that would take more than `budget` or change who controls
+  // one of our accounts — the API builds these transactions, and simulating proves only that they run.
+  const sim = await simulateWithinBudget(conn, tx, signer.publicKey, budget, {
+    what,
+    source: "launchpad API",
+  });
   if (sim.value.err) {
     // The transaction itself says which deployment the API built against, which is what the error
     // codes belong to — no need to ask the chain.
@@ -1325,6 +1337,11 @@ export interface DeployTokenArgs {
   devBuyPctOfTotalSupply?: number;
   /** Deliberately launch with no logo. Required to bypass `assertLogoDecision`. */
   noLogo?: boolean;
+  /**
+   * The most the launch may cost in COOK (creation fee + dev buy). Refused before anything is spent
+   * when the launchpad's numbers exceed it; required with `devBuyPctOfTotalSupply`.
+   */
+  maxCostCook?: string | number;
 }
 
 /**
@@ -1343,6 +1360,67 @@ export function launchCurve(cfg: LaunchpadConfig): CurveState | null {
     tokensSold: "0",
     paymentRaisedNet: "0",
   };
+}
+
+/**
+ * The highest creation fee a launch pays without an explicit `maxCostCook`. The fee comes from the
+ * launchpad API's `/config`, the same source that builds the launch transaction, so without an
+ * independent ceiling a hostile or spoofed API could quote any fee and the spend guard would accept
+ * a build that takes it. 2,000 COOK is the most the launchpad has ever charged (it is 0 today).
+ */
+export const MAX_UNCAPPED_CREATION_FEE_COOK = 2_000;
+
+/**
+ * Pre-flight refusal for what a launch may cost (pure). Runs before the dev buy is wrapped, the logo
+ * pinned or a mint leased — all free to refuse here, none of them afterwards.
+ *
+ * - With `maxCostCook`: creation fee + dev buy must not exceed it.
+ * - Without it: the creation fee must not exceed `MAX_UNCAPPED_CREATION_FEE_COOK`, and a dev buy
+ *   sized off the API's curve (`devBuyPctOfTotalSupply`) is refused, because then the API chooses
+ *   both numbers the spend budget is made of.
+ */
+export function assertLaunchCost(args: {
+  creationFeeRaw: bigint;
+  devBuyRaw: bigint;
+  devBuyFromCurve: boolean;
+  maxCostCook?: string | number;
+}): void {
+  const total = args.creationFeeRaw + args.devBuyRaw;
+  const fmt = (v: bigint) => `${rawToUi(v, COOK_DECIMALS)} ${COOK_SYMBOL}`;
+  if (args.maxCostCook !== undefined) {
+    let maxRaw: bigint;
+    try {
+      maxRaw = uiToRaw(args.maxCostCook, COOK_DECIMALS);
+    } catch {
+      throw new CookieMcpError(
+        `invalid maxCostCook "${args.maxCostCook}"`,
+        "pass the most this launch may cost in COOK, e.g. 50",
+      );
+    }
+    if (total > maxRaw) {
+      throw new CookieMcpError(
+        `this launch would cost ${fmt(total)} (creation fee ${fmt(args.creationFeeRaw)} + dev buy ` +
+          `${fmt(args.devBuyRaw)}), more than maxCostCook ${fmt(maxRaw)}`,
+        "nothing was spent; raise maxCostCook if that price is intended, or lower the dev buy",
+      );
+    }
+    return;
+  }
+  if (args.devBuyFromCurve) {
+    throw new CookieMcpError(
+      "devBuyPctOfTotalSupply sizes the dev buy off the launchpad API's curve, so maxCostCook is " +
+        "required with it",
+      `pass maxCostCook (the most the launch may cost, fee + dev buy) — this one would be ${fmt(total)}`,
+    );
+  }
+  const cap = uiToRaw(MAX_UNCAPPED_CREATION_FEE_COOK, COOK_DECIMALS);
+  if (args.creationFeeRaw > cap) {
+    throw new CookieMcpError(
+      `the launchpad reports a creation fee of ${fmt(args.creationFeeRaw)}, above the ` +
+        `${MAX_UNCAPPED_CREATION_FEE_COOK} ${COOK_SYMBOL} this tool accepts without maxCostCook`,
+      "nothing was spent; if that fee is real and intended, pass maxCostCook to accept it",
+    );
+  }
 }
 
 /**
@@ -1627,6 +1705,15 @@ async function deployTokenInner(args: DeployTokenArgs): Promise<DeployTokenResul
         ? uiToRaw(args.devBuyCook, COOK_DECIMALS)
         : 0n;
 
+  // Both cost inputs came from the API that will build the transaction; cap them independently
+  // before anything (the wrap below included) is spent on their say-so.
+  assertLaunchCost({
+    creationFeeRaw: BigInt(cfg.creationFeeLamports),
+    devBuyRaw,
+    devBuyFromCurve: args.devBuyPctOfTotalSupply != null,
+    maxCostCook: args.maxCostCook,
+  });
+
   // Fund the wCOOK the dev-buy leg will spend, BEFORE the logo is pinned and a vanity mint is leased.
   // The launch bundle creates that account but never funds it, so an unfunded wallet would otherwise
   // fail at simulation having already burned a pin and a rate-limited mint.
@@ -1665,7 +1752,12 @@ async function deployTokenInner(args: DeployTokenArgs): Promise<DeployTokenResul
       session,
     }),
   );
-  const signature = await submitBuilt(built, signer, "launch", undefined, {
+  // Creation fee + the dev buy + rent for the pool's accounts; nothing else may leave the wallet.
+  const launchBudget = nativeBudget(
+    BigInt(cfg.creationFeeLamports) + devBuyRaw,
+    LAUNCH_RENT_ALLOWANCE,
+  );
+  const signature = await submitBuilt(built, signer, "launch", launchBudget, undefined, {
     name: args.name,
     symbol: args.symbol,
     mint: built.mint ?? null,
@@ -1861,7 +1953,7 @@ export async function launchpadBuy(args: {
     paymentAmount: paymentRaw.toString(),
     referrer,
   });
-  const signature = await submitBuilt(built, signer, "buy", undefined, {
+  const signature = await submitBuilt(built, signer, "buy", nativeBudget(paymentRaw), undefined, {
     ref: args.ref,
     amountCook: String(args.amountCook),
   });
@@ -1961,7 +2053,8 @@ export async function launchpadSell(args: {
     tokenShares: sharesRaw.toString(),
     unwrap: args.unwrap ?? true,
   });
-  const signature = await submitBuilt(built, signer, "sell", undefined, {
+  // Selling spends curve shares (program state, not a token balance), so only fees may leave.
+  const signature = await submitBuilt(built, signer, "sell", nativeBudget(0n), undefined, {
     ref: args.ref,
     shares: String(args.shares),
   });
@@ -2188,7 +2281,7 @@ export async function claimLaunchpad(args: {
           },
         }
       : undefined;
-  const signature = await submitBuilt(built, signer, "claim", codeHints);
+  const signature = await submitBuilt(built, signer, "claim", nativeBudget(0n), codeHints);
 
   // Report what landed: shares → SPL tokens 1:1 for graduated claims, COOK for payouts. Best-effort —
   // the claim already succeeded, so a failed estimate must never turn into a thrown error.
@@ -2263,7 +2356,7 @@ export async function claimCreatorFees(args: {
     pool: pool.pubkey,
     unwrap: args.unwrap ?? true,
   });
-  const signature = await submitBuilt(built, signer, "creator-fee claim");
+  const signature = await submitBuilt(built, signer, "creator-fee claim", nativeBudget(0n));
 
   return {
     signature,

@@ -26,6 +26,8 @@ import {
   resolveClaimKind,
   resolveReferrer,
   sendFailure,
+  assertLaunchCost,
+  MAX_UNCAPPED_CREATION_FEE_COOK,
 } from "./index";
 import { CookieMcpError } from "../errors";
 import type { LaunchpadPool } from "./api";
@@ -964,5 +966,57 @@ describe("deploy_token anti-snipe reporting", () => {
     // With no pool read back, falling back to the request is still the best available answer.
     const noPool: { antiSnipe: boolean } | null = null;
     expect(noPool?.antiSnipe ?? requested).toBe(true);
+  });
+});
+
+describe("assertLaunchCost", () => {
+  const COOK = 10n ** 9n;
+  it("accepts a launch under maxCostCook and refuses one over it, naming the parts", () => {
+    expect(() =>
+      assertLaunchCost({
+        creationFeeRaw: 0n,
+        devBuyRaw: 5n * COOK,
+        devBuyFromCurve: true,
+        maxCostCook: 5,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertLaunchCost({
+        creationFeeRaw: COOK,
+        devBuyRaw: 5n * COOK,
+        devBuyFromCurve: false,
+        maxCostCook: "5.5",
+      }),
+    ).toThrow(
+      /cost 6 COOK \(creation fee 1 COOK \+ dev buy 5 COOK\), more than maxCostCook 5.5 COOK/,
+    );
+    expect(() =>
+      assertLaunchCost({
+        creationFeeRaw: 0n,
+        devBuyRaw: 0n,
+        devBuyFromCurve: false,
+        maxCostCook: "lots",
+      }),
+    ).toThrow(/invalid maxCostCook/);
+  });
+
+  it("without maxCostCook: caps the API-reported creation fee and refuses a curve-priced dev buy", () => {
+    const cap = BigInt(MAX_UNCAPPED_CREATION_FEE_COOK) * COOK;
+    expect(() =>
+      assertLaunchCost({ creationFeeRaw: cap, devBuyRaw: 10n * COOK, devBuyFromCurve: false }),
+    ).not.toThrow();
+    expect(() =>
+      assertLaunchCost({ creationFeeRaw: cap + 1n, devBuyRaw: 0n, devBuyFromCurve: false }),
+    ).toThrow(/above the 2000 COOK this tool accepts without maxCostCook/);
+    const err = (() => {
+      try {
+        assertLaunchCost({ creationFeeRaw: 0n, devBuyRaw: 3n * COOK, devBuyFromCurve: true });
+      } catch (e) {
+        return e;
+      }
+      return null;
+    })();
+    expect(err).toBeInstanceOf(CookieMcpError);
+    expect(String((err as Error).message)).toMatch(/maxCostCook is required/);
   });
 });

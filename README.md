@@ -152,7 +152,10 @@ path to a keypair file.
   ```
 
 Your key never leaves your machine, is used only to sign locally, and is redacted from all output.
-Every money-moving action is simulated before it is sent.
+Every money-moving action is simulated before it is sent. A transaction that a venue API built (a
+swap, any launchpad action) is also held to what you asked for: if its simulation would take more
+than the requested amount plus fees, touch another token you hold, hand one of your token accounts
+or a delegate to someone else, or deliver less than the quoted minimum, it is refused unsigned.
 
 ## Try it
 
@@ -303,7 +306,8 @@ ones are — user, amounts, frequency, the band, the start time, the schedule PD
 token on a COOK bonding curve (a logo is **required** — pass `imageBase64` and it is pinned to IPFS, or
 set `noLogo: true` to launch without one; the metadata is immutable, so a logo cannot be added later.
 Costs the launchpad creation fee, read from its config at call time, plus any
-`devBuyCook`), `launchpad_buy` / `launchpad_sell` trade that curve, `claim_launchpad`
+`devBuyCook`; `maxCostCook` caps the total and is required with `devBuyPctOfTotalSupply`),
+`launchpad_buy` / `launchpad_sell` trade that curve, `claim_launchpad`
 settles a position (the real SPL token after graduation, a Fair-mode refund, or a Jackpot/Survivor payout),
 and `claim_creator_fees` sweeps the creator's share of trading fees from a launch you created.
 
@@ -446,7 +450,8 @@ COOKIE_MCP_ALLOWED_HOSTS=mcp.example.com COOKIE_MCP_CORS_ORIGIN=https://app.exam
 - Every request names the wallet it acts for with an `x-cookie-wallet: <base58>` header (or set
   `COOKIE_WALLET_ADDRESS` for a single-wallet deployment). Reads work as before.
 - Every money-moving tool runs **all** of its checks — instruction decoding, spend refusals, the
-  simulation — and then, instead of signing, returns a normal (non-error) result:
+  simulation and its balance check — and then, instead of signing, returns a normal (non-error)
+  result:
 
   ```json
   {

@@ -178,8 +178,10 @@ export class ExternalSigner implements TxSigner {
       step,
       ...(ctx.summary ? { summary: ctx.summary } : {}),
       next:
-        `sign transactionBase64 with wallet ${this.publicKey.toBase58()} (do not modify it — it is ` +
-        `already verified, simulated and co-signed), then call submit_signed_tx with the signed ` +
+        `sign transactionBase64 with wallet ${this.publicKey.toBase58()} (do not modify it — any ` +
+        `co-signatures would break; it was simulated, and its effect on this wallet checked against ` +
+        `the request, which is what \`summary\` describes — let the wallet show the user what it ` +
+        `does before they approve), then call submit_signed_tx with the signed ` +
         `bytes and the same submit/blockhash/lastValidBlockHeight fields` +
         (step === "intermediate"
           ? `. This is a prerequisite step: once it confirms, call the same tool again with the same ` +

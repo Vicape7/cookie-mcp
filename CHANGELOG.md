@@ -61,6 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     the pre-check and then connect inward.
 
   The body is also capped while it streams, not after it has been buffered.
+
 - `deploy_token.imagePath` no longer reads arbitrary files. Over HTTP and in external-signer mode it
   is refused outright: it read the server's disk for a remote caller and pinned the bytes to public
   IPFS. On stdio it reads only from the home directory (or `COOKIE_IMAGE_DIR`), after resolving
@@ -75,6 +76,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unless it is listed, and `COOKIE_HTTP_ALLOW_LOCAL_KEY=1` now also requires `COOKIE_MCP_HTTP_TOKEN`.
   A loopback bind is not private against a browser. With an external signer (no key in the
   process), the default stays `*`, so browser front-ends keep working unchanged.
+- **Swap and launchpad transactions that a venue API built are checked for what they do before
+  signing**, not just for whether they simulate. This covers Candy Shop, the Cookiebox aggregator,
+  Jupiter, and the MomoSwap launch, buy, sell and claims. The transaction is simulated with the
+  post-state of every account we own that it writes, with lookup tables resolved from the chain.
+  It is refused when the fee payer is not our wallet, or when it calls the stake, vote or
+  upgradeable-loader programs. It is also refused when it would take more native value (wallet +
+  wrapped) than the requested amount plus a 0.02 fee/rent allowance, take any other token
+  beyond the request, reassign the wallet, hand one of our token accounts to another owner, add a
+  delegate or close authority, or deliver less than the quoted minimum. Before this, a compromised
+  or spoofed API (`COOKIE_SWAP_API_URL`, `COOKIEBOX_AGG_API_URL`, `JUPITER_API_URL`,
+  `MOMOSWAP_API_URL`) could slip extra transfers into a build that simulated cleanly.
+  The check also refuses a build that writes to an account owned by one of those programs, which a
+  route program could reach by CPI without appearing in the instruction list.
+- **Swap quotes are held to the requested slippage.** A venue's `minOutAmount` below
+  `totalOut × (1 − slippage)` is refused before a transaction is built, so the venue cannot weaken
+  the delivery check by quoting a tiny minimum. Jupiter's priority fee is capped at 0.005 SOL in the
+  swap request, and the spend budget allows no more than that cap however much the response reports.
+- **`deploy_token` takes `maxCostCook`**, the most a launch may cost (creation fee + dev buy). Both
+  numbers come from the launchpad API, which also builds the transaction, so without it a creation
+  fee above 2,000 COOK is refused, and `devBuyPctOfTotalSupply` (priced off the API's curve)
+  requires it. The refusal happens before the dev buy is wrapped or the logo pinned.
+- `needs_signature.next` no longer calls the bytes "already verified". It says what was checked, and
+  that the user should still review the transaction in their wallet.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
