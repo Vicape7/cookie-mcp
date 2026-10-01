@@ -5,6 +5,7 @@
 // it promptly (best-effort).
 import { BAKED_BAZAAR_API_URL } from "../config";
 import { fetchJson } from "../http";
+import type { BazaarLog } from "../signer";
 
 export interface BazaarCreator {
   address: string;
@@ -114,14 +115,6 @@ export async function fetchCollectionStats(symbol: string): Promise<BazaarCollec
   return orNull(
     fetchJson<BazaarCollectionStats>(`${base()}/collection-stats/${encodeURIComponent(symbol)}`),
   );
-}
-
-/** What the indexer is told about a confirmed marketplace transaction, besides its signature. */
-export interface BazaarLog {
-  type: "list" | "cancel-listing" | "buy" | "offer" | "cancel-offer" | "accept-offer";
-  nftMint: string;
-  /** COOK lamports, decimal string. */
-  price?: string;
 }
 
 // Best-effort: tell the indexer about a signed+confirmed tx so listings/offers update without waiting

@@ -15,7 +15,6 @@ import { Keypair, PublicKey, Transaction, VersionedTransaction } from "@solana/w
 import bs58 from "bs58";
 
 import type { ProvidedSignature } from "./context";
-import type { BazaarLog } from "./nft/bazaar";
 
 /** Where a signed transaction must go. Mirrors the send paths the tools use themselves. */
 export type SubmitRoute =
@@ -25,6 +24,18 @@ export type SubmitRoute =
   | { via: "solana-rpc" }
   /** Candy Shop's own `/submit-tx` + `/confirm-tx` (Cookiescan-aggregator swaps). */
   | { via: "candyshop"; pools: string[] };
+
+/**
+ * What the Baked Bazaar indexer is told about a confirmed marketplace transaction, besides its
+ * signature. Defined here, not in the NFT module, because it rides the signer protocol
+ * (`needs_signature` → `submit_signed_tx`) and this file must not depend on a venue.
+ */
+export interface BazaarLog {
+  type: "list" | "cancel-listing" | "buy" | "offer" | "cancel-offer" | "accept-offer";
+  nftMint: string;
+  /** COOK lamports, decimal string. */
+  price?: string;
+}
 
 /** What a flow tells the signer about the transaction it is about to sign. */
 export interface SignContext {

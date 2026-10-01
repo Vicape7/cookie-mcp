@@ -21,7 +21,7 @@ import { rawToUi, uiToRaw, shortAddr } from "../format";
 import { getConnection } from "../rpc";
 import { requireSigner, ownPublicKey } from "../wallet";
 import { signSendConfirm } from "../liquidity/send";
-import type { TxSigner } from "../signer";
+import type { BazaarLog, TxSigner } from "../signer";
 import {
   AH_SELLER_FEE_BPS,
   escrowPaymentAccount,
@@ -45,7 +45,6 @@ import {
   fetchCollectionStats,
   logTransaction,
   type BazaarListing,
-  type BazaarLog,
   type BazaarOffer,
 } from "./bazaar";
 

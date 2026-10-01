@@ -116,6 +116,19 @@ describe("submitSignedTransaction and the marketplace indexer", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("reports nothing for a transaction sent on another route", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+    const res = await submitSignedTransaction({
+      signedTransactionBase64: signedBase64(),
+      submit: { via: "solana-rpc" },
+      what: "NFT",
+      bazaarLog,
+    });
+    expect(res.confirmed).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("reports nothing without a bazaarLog", async () => {
     const fetchMock = vi.fn(async () => new Response("{}"));
     vi.stubGlobal("fetch", fetchMock);

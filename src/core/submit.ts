@@ -9,9 +9,9 @@ import { confirmTx, submitSignedTx } from "./candyshop";
 import { confirmSent } from "./confirm";
 import { explorerTxUrl, solanaExplorerTxUrl } from "./config";
 import { CookieMcpError } from "./errors";
-import { logTransaction, type BazaarLog } from "./nft/bazaar";
+import { logTransaction } from "./nft/bazaar";
 import { getConnection, getSolanaConnection } from "./rpc";
-import type { AnyTransaction, SubmitRoute } from "./signer";
+import type { AnyTransaction, BazaarLog, SubmitRoute } from "./signer";
 
 export interface SubmitSignedArgs {
   signedTransactionBase64: string;
@@ -163,8 +163,9 @@ export async function submitSignedTransaction(args: SubmitSignedArgs): Promise<S
   if (args.what === "bridge" && confirmed) {
     messageId = await bridgeMessageId(conn, signature);
   }
-  // The NFT tool would have told the indexer after its own confirm; do the same here.
-  if (args.bazaarLog && confirmed) {
+  // The NFT tool would have told the indexer after its own confirm; do the same here. NFT
+  // transactions only ever go out on the Cookie Chain RPC, so nothing else is reported.
+  if (args.bazaarLog && confirmed && route.via === "cookie-rpc") {
     await logTransaction({ signature, ...args.bazaarLog });
   }
   return {
