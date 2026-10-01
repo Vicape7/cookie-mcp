@@ -51,6 +51,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`?api-key=…`, `/v2/<key>`) used to be returned verbatim to every caller, and over HTTP that means
   anyone who can reach the port. Error messages that echo the Cookie Chain or Solana RPC URL are cut
   back the same way.
+- `deploy_token.imageUrl`'s private-network guard closes three gaps:
+  - IPv6 is now parsed to bytes, so an IPv4-mapped address in the hex form `URL` normalises it to
+    (`https://[::ffff:127.0.0.1]/` becomes `[::ffff:7f00:1]`) is caught.
+  - NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are checked against the IPv4 address
+    they reach, and Teredo, local-use NAT64 and documentation ranges are refused.
+  - The fetch now goes over `node:https` with the connection's own DNS lookup checked. The address
+    that was checked is the one the socket connects to, so a DNS-rebinding name can no longer pass
+    the pre-check and then connect inward.
+
+  The body is also capped while it streams, not after it has been buffered.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
