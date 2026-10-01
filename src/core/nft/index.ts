@@ -506,7 +506,16 @@ export async function makeOffer(args: {
   const mint = new PublicKey(args.mint);
   const price = toLamports(args.price, "price");
 
-  const ixs: TransactionInstruction[] = [];
+  const ixs: TransactionInstruction[] = [
+    // `public_buy` reads the bidder's ATA for the NFT as `token_account` and fails with 3012
+    // (AccountNotInitialized) when it does not exist yet — i.e. on a first offer in a collection.
+    createAssociatedTokenAccountIdempotentInstruction(
+      buyer,
+      nftTokenAccount(mint, buyer),
+      buyer,
+      mint,
+    ),
+  ];
   const fund = await fundEscrowIx(conn, buyer, price);
   if (fund) ixs.push(fund);
   ixs.push(buildPublicBuyIx({ buyer, nftMint: mint, price }));
