@@ -471,7 +471,9 @@ COOKIE_SIGNER=external npx cookie-mcp --http 3000 --host 0.0.0.0
   account before a bridge, CLMM tick-array init). After it confirms, call the same tool again with the
   same arguments to continue.
 - `kind: "message"` (only `deploy_token`, for the launchpad login) asks the wallet to `signMessage`
-  the exact text; call `deploy_token` again with `loginSignature: { message, signature }`.
+  the exact text; call `deploy_token` again with `loginSignature: { message, signature }`. In
+  external mode the session is not cached server-side (the wallet header proves nothing), so every
+  launch asks for its own login signature.
 - Blockhashes expire in about a minute. If the wallet prompt is slow, `submit_signed_tx` reports the
   timeout with the signature and a "do not retry blindly" hint; re-run the tool for fresh bytes.
 - The HTTP server is stateless (one fresh server per POST), answers `/healthz`, and sends permissive

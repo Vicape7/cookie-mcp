@@ -57,8 +57,10 @@ export function parseLoginMessage(
   return { nonce: m[2]!, wallet: m[3]!, ts: Number(m[4]) };
 }
 
-// Keyed by wallet: a hosted server logs many wallets in, and one wallet's token must never be handed
-// to another's launch.
+// Local signer only, keyed by wallet. With an external signer the wallet comes from the request
+// (`x-cookie-wallet` over HTTP), which anyone can set to anyone's address — so a cached token would
+// let any caller who names a wallet ride that wallet's session. External mode therefore logs in per
+// launch: the caller presents a fresh `loginSignature` every time, and nothing outlives the request.
 const cached = new Map<string, { token: string; expiresAt: number }>();
 
 /** Drop the cached tokens — after a 401, and between tests. */
@@ -68,8 +70,9 @@ export function resetLaunchpadSession(wallet?: string): void {
 }
 
 /**
- * A session token for this wallet, minting one only when there isn't a usable one already. The token
- * lives 30 days server-side, so in practice one login covers a whole MCP process.
+ * A session token for this wallet. With a local signer it is minted only when there isn't a usable one
+ * already; the token lives 30 days server-side, so in practice one login covers a whole MCP process.
+ * With an external signer it is never cached (see `cached`), so every launch needs its own login.
  *
  * External signer: if the request carries a signature over one of OUR login messages for this wallet
  * (`loginSignature`), the login completes with the ts/nonce embedded in that message — the nonce came
@@ -80,7 +83,8 @@ export async function launchpadSessionToken(signerOrKeypair: TxSigner | Keypair)
   const signer =
     signerOrKeypair instanceof Keypair ? new LocalKeypairSigner(signerOrKeypair) : signerOrKeypair;
   const wallet = signer.publicKey.toBase58();
-  const hit = cached.get(wallet);
+  const cacheable = signer.kind === "local";
+  const hit = cacheable ? cached.get(wallet) : undefined;
   if (hit && hit.expiresAt - EXPIRY_SKEW_MS > Date.now()) {
     return hit.token;
   }
@@ -101,6 +105,7 @@ export async function launchpadSessionToken(signerOrKeypair: TxSigner | Keypair)
   }
   const signature = await signer.signMessage(message, "launchpad login");
   const session = await createSession({ wallet, ts, nonce, signature });
+  if (!cacheable) return session.token;
   cached.set(wallet, {
     token: session.token,
     // `expiresAt` is epoch ms from the server. Treat a missing/garbage value as "expires now" rather

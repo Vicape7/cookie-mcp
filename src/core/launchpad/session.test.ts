@@ -151,6 +151,20 @@ describe("launchpadSessionToken — external signer", () => {
     expect(body).toMatchObject({ wallet: WALLET, nonce: "abc123", ts: 1735689600, signature });
   });
 
+  it("never caches the token: naming the wallet again does not reuse its session", async () => {
+    stubLogin({ token: "tok-victim" });
+    const message = loginMessage(WALLET, 1735689600, "abc123");
+    const signature = signLoginMessage(message, KP);
+    await runWithRequestContext({ providedSignatures: [{ message, signature }] }, () =>
+      launchpadSessionToken(new ExternalSigner(KP.publicKey, [{ message, signature }])),
+    );
+    // Another caller who only knows the address (x-cookie-wallet) and carries no signature.
+    const { fetchMock } = stubLogin({ token: "tok-victim" });
+    const err = await launchpadSessionToken(new ExternalSigner(KP.publicKey)).catch((e) => e);
+    expect(err).toBeInstanceOf(SignatureRequired);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // a fresh nonce, no session handed out
+  });
+
   it("ignores a supplied signature for a different wallet", async () => {
     stubLogin();
     const other = Keypair.generate();

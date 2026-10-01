@@ -40,6 +40,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `bridge_status` and `bridge {waitForDelivery}` no longer fail on a delivered message when the RPC
   refuses `getSignaturesForAddress` (common on free RPC plans); `destinationTx` is null instead.
 
+### Security
+
+- In external-signer mode the launchpad login session is no longer cached by wallet. The cache was
+  keyed by the `x-cookie-wallet` header, which any caller can set, so once a wallet had logged in
+  through a hosted server, anyone naming that wallet could build launches on its session. Each
+  `deploy_token` in external mode now needs its own `loginSignature`. The local-key cache is
+  unchanged.
+
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
 _September 23, 2026_
