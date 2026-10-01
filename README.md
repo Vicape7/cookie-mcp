@@ -178,7 +178,9 @@ it never turns a name straight into a trade.
 | `COOKIE_SIGNER`                            | `local`                               | `external` = no key in the process; tools return `needs_signature` for the user's wallet to sign. |
 | `COOKIE_WALLET_ADDRESS`                    | —                                     | External mode: default wallet when a request carries no `x-cookie-wallet` header.                 |
 | `COOKIE_MCP_HTTP_PORT` / `_HOST` / `_PATH` | — / `127.0.0.1` / `/mcp`              | Serve Streamable HTTP instead of stdio (same as `--http [port]`).                                 |
-| `COOKIE_MCP_CORS_ORIGIN`                   | `*`                                   | Allowed browser origin for the HTTP server.                                                       |
+| `COOKIE_MCP_CORS_ORIGIN`                   | `*`, or none with a local key         | Comma-separated browser origins allowed to call the HTTP server (`*` = any).                      |
+| `COOKIE_MCP_HTTP_TOKEN`                    | —                                     | Bearer token every HTTP MCP request must send. Required with a local key over HTTP.               |
+| `COOKIE_MCP_ALLOWED_HOSTS`                 | loopback names on a loopback bind     | Comma-separated `Host` values the HTTP server answers to (blocks DNS rebinding).                  |
 | `COOKIE_IMAGE_DIR`                         | home directory                        | The only folder `deploy_token.imagePath` may read from (stdio only; refused over HTTP).           |
 | `COOKIE_SLIPPAGE_BPS`                      | `500`                                 | Default slippage (bps).                                                                           |
 | `COOKIE_REFERRER`                          | `mcp treasury`                        | Referral wallet (MomoSwap only).                                                                  |
@@ -436,7 +438,9 @@ Telegram bot, a shared agent — cannot hold users' keys and should not ask for 
 cookie-mcp runs **without any key** and lets the user's own wallet sign:
 
 ```bash
-COOKIE_SIGNER=external npx cookie-mcp --http 3000 --host 0.0.0.0
+COOKIE_SIGNER=external COOKIE_MCP_HTTP_TOKEN=<long random secret> \
+COOKIE_MCP_ALLOWED_HOSTS=mcp.example.com COOKIE_MCP_CORS_ORIGIN=https://app.example.com \
+  npx cookie-mcp --http 3000 --host 0.0.0.0
 ```
 
 - Every request names the wallet it acts for with an `x-cookie-wallet: <base58>` header (or set
@@ -477,10 +481,16 @@ COOKIE_SIGNER=external npx cookie-mcp --http 3000 --host 0.0.0.0
   launch asks for its own login signature.
 - Blockhashes expire in about a minute. If the wallet prompt is slow, `submit_signed_tx` reports the
   timeout with the signature and a "do not retry blindly" hint; re-run the tool for fresh bytes.
-- The HTTP server is stateless (one fresh server per POST), answers `/healthz`, and sends permissive
-  CORS headers so a browser front-end can call it directly. It **refuses to start** with a local
-  `COOKIE_PRIVATE_KEY` unless `COOKIE_HTTP_ALLOW_LOCAL_KEY=1`, because anyone reaching the port could
-  spend from that key.
+- The HTTP server is stateless (one fresh server per POST) and answers `/healthz`. A loopback bind
+  is **not** private: any web page open in a browser on the same machine can reach `127.0.0.1`. So
+  every request is checked first. The `Host` must be one the server answers to (loopback names on a
+  loopback bind, else `COOKIE_MCP_ALLOWED_HOSTS`), which defeats DNS rebinding. A request from a
+  browser (one with an `Origin` header) must match `COOKIE_MCP_CORS_ORIGIN`. Unset, that allows any
+  origin with an external signer, where a page can only get unsigned transactions the user's wallet
+  still has to approve, and **no** origin when the server holds a local key. With
+  `COOKIE_MCP_HTTP_TOKEN` set, `Authorization: Bearer <token>` is required. The server **refuses to
+  start** with a local `COOKIE_PRIVATE_KEY` unless both `COOKIE_HTTP_ALLOW_LOCAL_KEY=1` and
+  `COOKIE_MCP_HTTP_TOKEN` are set, because anyone reaching the port could spend from that key.
 
 **As a library.** The same flows are importable without MCP:
 

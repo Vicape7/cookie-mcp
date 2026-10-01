@@ -66,6 +66,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   IPFS. On stdio it reads only from the home directory (or `COOKIE_IMAGE_DIR`), after resolving
   symlinks, and never from a hidden folder. A missing, unreadable or out-of-bounds path now gets one
   generic error that does not echo the resolved path, so it can no longer be used to probe the disk.
+- **The `--http` server can no longer be driven by an arbitrary web page or DNS-rebinding page.**
+  Before, it checked no `Host` and had no authentication. So any site open in the operator's browser
+  could call a server on `127.0.0.1`, and a DNS-rebinding page could do it even with the origin
+  pinned. Now a loopback bind answers only to loopback `Host` names (set `COOKIE_MCP_ALLOWED_HOSTS`
+  for a public bind), and `COOKIE_MCP_HTTP_TOKEN` adds a required `Authorization: Bearer` token.
+- With a local key, `COOKIE_MCP_CORS_ORIGIN` no longer defaults to `*`. No browser origin is allowed
+  unless it is listed, and `COOKIE_HTTP_ALLOW_LOCAL_KEY=1` now also requires `COOKIE_MCP_HTTP_TOKEN`.
+  A loopback bind is not private against a browser. With an external signer (no key in the
+  process), the default stays `*`, so browser front-ends keep working unchanged.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
