@@ -77,7 +77,20 @@ describe("readImageFile", () => {
     for (const p of [missing, dir, write("empty.png", Buffer.alloc(0))]) {
       expect(() => readImageFile(p)).toThrow(/not a readable image file under the image directory/);
     }
-    expect(() => readImageFile(missing)).not.toThrow(new RegExp(fs.realpathSync(dir)));
+    // The message echoes the path as typed, so type it through an alias: where the temp dir is not
+    // itself a symlink (Linux `/tmp`), the typed path would otherwise be the real one.
+    const alias = path.join(outside, "alias");
+    fs.symlinkSync(dir, alias);
+    expect(() => readImageFile(path.join(alias, "nope.png"))).toThrow(
+      /not a readable image file under the image directory/,
+    );
+    let message = "";
+    try {
+      readImageFile(path.join(alias, "nope.png"));
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).not.toContain(fs.realpathSync(dir));
   });
 
   it("refuses a non-image", () => {
