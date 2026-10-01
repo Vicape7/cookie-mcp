@@ -998,7 +998,9 @@ export function createServer(): McpServer {
           .describe(
             "path to a logo file on this machine (PNG/JPEG/GIF/WebP, max 5 MB, `~` ok) — preferred " +
               "over imageBase64 for a local file: the server reads the bytes and detects the type, " +
-              "so the image never has to be base64'd through the conversation",
+              "so the image never has to be base64'd through the conversation. Must sit inside the " +
+              "home directory (or COOKIE_IMAGE_DIR) with no hidden folder in the path. Refused on a " +
+              "hosted (HTTP / external-signer) server — use imageBase64 or imageUrl there",
           ),
         website: z.string().optional().describe("project website URL"),
         twitter: z.string().optional().describe("X/Twitter handle or URL"),

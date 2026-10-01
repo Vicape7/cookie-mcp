@@ -119,7 +119,7 @@ export async function handleHttpRequest(
     void server.close();
   });
   try {
-    await runWithRequestContext({ ...(wallet ? { wallet } : {}) }, async () => {
+    await runWithRequestContext({ remote: true, ...(wallet ? { wallet } : {}) }, async () => {
       await server.connect(transport);
       await transport.handleRequest(req, res, parsedBody);
     });

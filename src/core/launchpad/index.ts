@@ -38,7 +38,7 @@ import { resolveWallet } from "../domains";
 import { CookieMcpError } from "../errors";
 import { rawToUi, uiToRaw } from "../format";
 import { fetchRemoteImage } from "../imageFetch";
-import { readImageFile } from "../imageFile";
+import { assertLocalFilesAllowed, readImageFile } from "../imageFile";
 import { getConnection } from "../rpc";
 import { ownPublicKey, requireSigner } from "../wallet";
 import type { TxSigner } from "../signer";
@@ -1596,6 +1596,8 @@ async function deployTokenInner(args: DeployTokenArgs): Promise<DeployTokenResul
   }
   // Before any network call or spend: a logo is unfixable after the fact.
   assertLogoDecision(args);
+  // A hosted server must not read its own disk for a caller; refuse before anything else happens.
+  if (args.imagePath?.trim()) assertLocalFilesAllowed();
   // Same rule for a dev buy: if we cannot verify a versioned build, say so before pinning metadata
   // and burning a leased mint on a launch that cannot be signed.
   assertDevBuySupported(

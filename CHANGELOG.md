@@ -61,6 +61,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     the pre-check and then connect inward.
 
   The body is also capped while it streams, not after it has been buffered.
+- `deploy_token.imagePath` no longer reads arbitrary files. Over HTTP and in external-signer mode it
+  is refused outright: it read the server's disk for a remote caller and pinned the bytes to public
+  IPFS. On stdio it reads only from the home directory (or `COOKIE_IMAGE_DIR`), after resolving
+  symlinks, and never from a hidden folder. A missing, unreadable or out-of-bounds path now gets one
+  generic error that does not echo the resolved path, so it can no longer be used to probe the disk.
 
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 

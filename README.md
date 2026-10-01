@@ -179,6 +179,7 @@ it never turns a name straight into a trade.
 | `COOKIE_WALLET_ADDRESS`                    | —                                     | External mode: default wallet when a request carries no `x-cookie-wallet` header.                 |
 | `COOKIE_MCP_HTTP_PORT` / `_HOST` / `_PATH` | — / `127.0.0.1` / `/mcp`              | Serve Streamable HTTP instead of stdio (same as `--http [port]`).                                 |
 | `COOKIE_MCP_CORS_ORIGIN`                   | `*`                                   | Allowed browser origin for the HTTP server.                                                       |
+| `COOKIE_IMAGE_DIR`                         | home directory                        | The only folder `deploy_token.imagePath` may read from (stdio only; refused over HTTP).           |
 | `COOKIE_SLIPPAGE_BPS`                      | `500`                                 | Default slippage (bps).                                                                           |
 | `COOKIE_REFERRER`                          | `mcp treasury`                        | Referral wallet (MomoSwap only).                                                                  |
 | `SOLANA_RPC_URL`                           | `https://api.mainnet-beta.solana.com` | Solana RPC.                                                                                       |
