@@ -3,6 +3,24 @@
 
 export const COOKIE_RPC_URL = process.env.COOKIE_RPC_URL?.trim() || "https://rpc.cookiescan.io";
 
+/**
+ * An endpoint URL as it may be shown to a caller: the origin only. Commercial RPCs put the credential
+ * in the URL (`?api-key=…`, `/v2/<key>`, `user:pass@`), and a tool result is read by the agent and,
+ * over HTTP, by whoever made the request — so the path, query and userinfo never leave the process.
+ */
+export function redactUrl(url: string): string {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return "[unparseable URL]";
+  }
+  const trimmed = u.username || u.password || u.pathname !== "/" || u.search || u.hash;
+  // Non-special schemes (`ws+unix:`, …) have an opaque origin that prints as the string "null".
+  const origin = u.origin === "null" ? `${u.protocol}//${u.host}` : u.origin;
+  return trimmed ? `${origin}/[redacted]` : origin;
+}
+
 export const COOKIE_SWAP_API_URL =
   process.env.COOKIE_SWAP_API_URL?.trim().replace(/\/$/, "") || "https://swap.cookiescan.io/api";
 

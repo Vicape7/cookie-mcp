@@ -1,7 +1,7 @@
 // chain_health — one batched JSON-RPC round trip: slot heights per commitment, finalization lag
 // (Cookie Chain's key health signal), epoch progress, validator/node counts, version, block rate,
 // and RPC latency.
-import { COOKIE_RPC_URL } from "./config";
+import { COOKIE_RPC_URL, redactUrl } from "./config";
 import { rpcBatch, type RpcRes } from "./rpc";
 
 export const FINALIZATION_WARN_SLOTS = 150;
@@ -131,7 +131,7 @@ export function deriveChainHealth(map: Map<string, RpcRes>, latencyMs: number): 
     validatorCount,
     delinquentCount,
     clusterNodeCount,
-    rpc: { endpoint: COOKIE_RPC_URL, latencyMs: Math.round(latencyMs) },
+    rpc: { endpoint: redactUrl(COOKIE_RPC_URL), latencyMs: Math.round(latencyMs) },
     ...(note ? { note } : {}),
   };
 }

@@ -152,7 +152,10 @@ path to a keypair file.
   ```
 
 Your key never leaves your machine, is used only to sign locally, and is redacted from all output.
-Every money-moving action is simulated before it is sent.
+Every money-moving action is simulated before it is sent. A transaction that a venue API built (a
+swap, any launchpad action) is also held to what you asked for: if its simulation would take more
+than the requested amount plus fees, touch another token you hold, hand one of your token accounts
+or a delegate to someone else, or deliver less than the quoted minimum, it is refused unsigned.
 
 ## Try it
 
@@ -178,7 +181,10 @@ it never turns a name straight into a trade.
 | `COOKIE_SIGNER`                            | `local`                               | `external` = no key in the process; tools return `needs_signature` for the user's wallet to sign. |
 | `COOKIE_WALLET_ADDRESS`                    | —                                     | External mode: default wallet when a request carries no `x-cookie-wallet` header.                 |
 | `COOKIE_MCP_HTTP_PORT` / `_HOST` / `_PATH` | — / `127.0.0.1` / `/mcp`              | Serve Streamable HTTP instead of stdio (same as `--http [port]`).                                 |
-| `COOKIE_MCP_CORS_ORIGIN`                   | `*`                                   | Allowed browser origin for the HTTP server.                                                       |
+| `COOKIE_MCP_CORS_ORIGIN`                   | `*`, or none with a local key         | Comma-separated browser origins allowed to call the HTTP server (`*` = any).                      |
+| `COOKIE_MCP_HTTP_TOKEN`                    | —                                     | Bearer token every HTTP MCP request must send. Required with a local key over HTTP.               |
+| `COOKIE_MCP_ALLOWED_HOSTS`                 | loopback names on a loopback bind     | Comma-separated `Host` values the HTTP server answers to (blocks DNS rebinding).                  |
+| `COOKIE_IMAGE_DIR`                         | home directory                        | The only folder `deploy_token.imagePath` may read from (stdio only; refused over HTTP).           |
 | `COOKIE_SLIPPAGE_BPS`                      | `500`                                 | Default slippage (bps).                                                                           |
 | `COOKIE_REFERRER`                          | `mcp treasury`                        | Referral wallet (MomoSwap only).                                                                  |
 | `SOLANA_RPC_URL`                           | `https://api.mainnet-beta.solana.com` | Solana RPC.                                                                                       |
@@ -300,7 +306,8 @@ ones are — user, amounts, frequency, the band, the start time, the schedule PD
 token on a COOK bonding curve (a logo is **required** — pass `imageBase64` and it is pinned to IPFS, or
 set `noLogo: true` to launch without one; the metadata is immutable, so a logo cannot be added later.
 Costs the launchpad creation fee, read from its config at call time, plus any
-`devBuyCook`), `launchpad_buy` / `launchpad_sell` trade that curve, `claim_launchpad`
+`devBuyCook`; `maxCostCook` caps the total and is required with `devBuyPctOfTotalSupply`),
+`launchpad_buy` / `launchpad_sell` trade that curve, `claim_launchpad`
 settles a position (the real SPL token after graduation, a Fair-mode refund, or a Jackpot/Survivor payout),
 and `claim_creator_fees` sweeps the creator's share of trading fees from a launch you created.
 
@@ -435,13 +442,16 @@ Telegram bot, a shared agent — cannot hold users' keys and should not ask for 
 cookie-mcp runs **without any key** and lets the user's own wallet sign:
 
 ```bash
-COOKIE_SIGNER=external npx cookie-mcp --http 3000 --host 0.0.0.0
+COOKIE_SIGNER=external COOKIE_MCP_HTTP_TOKEN=<long random secret> \
+COOKIE_MCP_ALLOWED_HOSTS=mcp.example.com COOKIE_MCP_CORS_ORIGIN=https://app.example.com \
+  npx cookie-mcp --http 3000 --host 0.0.0.0
 ```
 
 - Every request names the wallet it acts for with an `x-cookie-wallet: <base58>` header (or set
   `COOKIE_WALLET_ADDRESS` for a single-wallet deployment). Reads work as before.
 - Every money-moving tool runs **all** of its checks — instruction decoding, spend refusals, the
-  simulation — and then, instead of signing, returns a normal (non-error) result:
+  simulation and its balance check — and then, instead of signing, returns a normal (non-error)
+  result:
 
   ```json
   {
@@ -471,13 +481,21 @@ COOKIE_SIGNER=external npx cookie-mcp --http 3000 --host 0.0.0.0
   account before a bridge, CLMM tick-array init). After it confirms, call the same tool again with the
   same arguments to continue.
 - `kind: "message"` (only `deploy_token`, for the launchpad login) asks the wallet to `signMessage`
-  the exact text; call `deploy_token` again with `loginSignature: { message, signature }`.
+  the exact text; call `deploy_token` again with `loginSignature: { message, signature }`. In
+  external mode the session is not cached server-side (the wallet header proves nothing), so every
+  launch asks for its own login signature.
 - Blockhashes expire in about a minute. If the wallet prompt is slow, `submit_signed_tx` reports the
   timeout with the signature and a "do not retry blindly" hint; re-run the tool for fresh bytes.
-- The HTTP server is stateless (one fresh server per POST), answers `/healthz`, and sends permissive
-  CORS headers so a browser front-end can call it directly. It **refuses to start** with a local
-  `COOKIE_PRIVATE_KEY` unless `COOKIE_HTTP_ALLOW_LOCAL_KEY=1`, because anyone reaching the port could
-  spend from that key.
+- The HTTP server is stateless (one fresh server per POST) and answers `/healthz`. A loopback bind
+  is **not** private: any web page open in a browser on the same machine can reach `127.0.0.1`. So
+  every request is checked first. The `Host` must be one the server answers to (loopback names on a
+  loopback bind, else `COOKIE_MCP_ALLOWED_HOSTS`), which defeats DNS rebinding. A request from a
+  browser (one with an `Origin` header) must match `COOKIE_MCP_CORS_ORIGIN`. Unset, that allows any
+  origin with an external signer, where a page can only get unsigned transactions the user's wallet
+  still has to approve, and **no** origin when the server holds a local key. With
+  `COOKIE_MCP_HTTP_TOKEN` set, `Authorization: Bearer <token>` is required. The server **refuses to
+  start** with a local `COOKIE_PRIVATE_KEY` unless both `COOKIE_HTTP_ALLOW_LOCAL_KEY=1` and
+  `COOKIE_MCP_HTTP_TOKEN` are set, because anyone reaching the port could spend from that key.
 
 **As a library.** The same flows are importable without MCP:
 

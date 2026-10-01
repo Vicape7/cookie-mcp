@@ -154,8 +154,10 @@ export function createServer(): McpServer {
         "Second half of an externally signed action. When the server runs with an external signer " +
         "(no private key), every money-moving tool stops at the signing step and returns " +
         "`{ status: 'needs_signature', transactionBase64, submit, blockhash, lastValidBlockHeight, " +
-        "what, step }`. Sign `transactionBase64` with the user's wallet WITHOUT modifying it (it is " +
-        "already verified, simulated and co-signed), then call this with the signed bytes and the " +
+        "what, step }`. Sign `transactionBase64` with the user's wallet WITHOUT modifying it (any " +
+        "co-signatures would break; it was simulated and its effect on the wallet checked against " +
+        "the request, but the user should still review it in their wallet), then call this with the " +
+        "signed bytes and the " +
         "same `submit`, `blockhash`, `lastValidBlockHeight` and `what` fields. It sends on the named " +
         "route, confirms, and returns the signature. If the original result said `step: " +
         "'intermediate'`, call the original tool again afterwards to continue. Refuses bytes that " +
@@ -967,7 +969,9 @@ export function createServer(): McpServer {
         "refused unless you set `noLogo: true`, because the metadata is immutable and a logo can never " +
         "be added later. The mint address is chosen by the launchpad (the program requires one ending " +
         "in `momo`). Set `devBuyCook` (or `devBuyPctOfTotalSupply` for a share of the supply) to make " +
-        "your own buy the atomic first trade. Requires " +
+        "your own buy the atomic first trade. `maxCostCook` caps what the launch may cost (fee + dev " +
+        "buy) and is required with devBuyPctOfTotalSupply; without it a creation fee above 2000 COOK " +
+        "is refused. Requires " +
         "COOKIE_PRIVATE_KEY.",
       inputSchema: {
         name: z.string().min(1).max(32).describe("token name, max 32 chars"),
@@ -998,7 +1002,9 @@ export function createServer(): McpServer {
           .describe(
             "path to a logo file on this machine (PNG/JPEG/GIF/WebP, max 5 MB, `~` ok) — preferred " +
               "over imageBase64 for a local file: the server reads the bytes and detects the type, " +
-              "so the image never has to be base64'd through the conversation",
+              "so the image never has to be base64'd through the conversation. Must sit inside the " +
+              "home directory (or COOKIE_IMAGE_DIR) with no hidden folder in the path. Refused on a " +
+              "hosted (HTTP / external-signer) server — use imageBase64 or imageUrl there",
           ),
         website: z.string().optional().describe("project website URL"),
         twitter: z.string().optional().describe("X/Twitter handle or URL"),
@@ -1049,6 +1055,13 @@ export function createServer(): McpServer {
           .describe(
             "launch deliberately without a logo. Only set this if the user asked for it — the token " +
               "metadata is immutable, so no logo can ever be added and most UIs show a blank image",
+          ),
+        maxCostCook: z
+          .union([z.number().positive(), z.string()])
+          .optional()
+          .describe(
+            "the most this launch may cost in COOK (creation fee + dev buy); refused before any spend " +
+              "when the launchpad's numbers exceed it. Required with devBuyPctOfTotalSupply",
           ),
         loginSignature: z
           .object({ message: z.string().min(1), signature: z.string().min(1) })

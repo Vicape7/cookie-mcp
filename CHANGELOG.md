@@ -43,6 +43,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   account for the NFT yet — i.e. on almost every first offer. `public_buy` reads that account, so the
   offer now creates it idempotently first, the way `buy_nft` already does.
 
+### Security
+
+- In external-signer mode the launchpad login session is no longer cached by wallet. The cache was
+  keyed by the `x-cookie-wallet` header, which any caller can set, so once a wallet had logged in
+  through a hosted server, anyone naming that wallet could build launches on its session. Each
+  `deploy_token` in external mode now needs its own `loginSignature`. The local-key cache is
+  unchanged.
+- `get_wallet` and `chain_health` report the RPC as its origin only. A keyed `COOKIE_RPC_URL`
+  (`?api-key=…`, `/v2/<key>`) used to be returned verbatim to every caller, and over HTTP that means
+  anyone who can reach the port. Error messages that echo the Cookie Chain or Solana RPC URL are cut
+  back the same way.
+- `deploy_token.imageUrl`'s private-network guard closes three gaps:
+  - IPv6 is now parsed to bytes, so an IPv4-mapped address in the hex form `URL` normalises it to
+    (`https://[::ffff:127.0.0.1]/` becomes `[::ffff:7f00:1]`) is caught.
+  - NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses are checked against the IPv4 address
+    they reach, and Teredo, local-use NAT64 and documentation ranges are refused.
+  - The fetch now goes over `node:https` with the connection's own DNS lookup checked. The address
+    that was checked is the one the socket connects to, so a DNS-rebinding name can no longer pass
+    the pre-check and then connect inward.
+
+  The body is also capped while it streams, not after it has been buffered.
+
+- `deploy_token.imagePath` no longer reads arbitrary files. Over HTTP and in external-signer mode it
+  is refused outright: it read the server's disk for a remote caller and pinned the bytes to public
+  IPFS. On stdio it reads only from the home directory (or `COOKIE_IMAGE_DIR`), after resolving
+  symlinks, and never from a hidden folder. A missing, unreadable or out-of-bounds path now gets one
+  generic error that does not echo the resolved path, so it can no longer be used to probe the disk.
+- **The `--http` server can no longer be driven by an arbitrary web page or DNS-rebinding page.**
+  Before, it checked no `Host` and had no authentication. So any site open in the operator's browser
+  could call a server on `127.0.0.1`, and a DNS-rebinding page could do it even with the origin
+  pinned. Now a loopback bind answers only to loopback `Host` names (set `COOKIE_MCP_ALLOWED_HOSTS`
+  for a public bind), and `COOKIE_MCP_HTTP_TOKEN` adds a required `Authorization: Bearer` token.
+- With a local key, `COOKIE_MCP_CORS_ORIGIN` no longer defaults to `*`. No browser origin is allowed
+  unless it is listed, and `COOKIE_HTTP_ALLOW_LOCAL_KEY=1` now also requires `COOKIE_MCP_HTTP_TOKEN`.
+  A loopback bind is not private against a browser. With an external signer (no key in the
+  process), the default stays `*`, so browser front-ends keep working unchanged.
+- **Swap and launchpad transactions that a venue API built are checked for what they do before
+  signing**, not just for whether they simulate. This covers Candy Shop, the Cookiebox aggregator,
+  Jupiter, and the MomoSwap launch, buy, sell and claims. The transaction is simulated with the
+  post-state of every account we own that it writes, with lookup tables resolved from the chain.
+  It is refused when the fee payer is not our wallet, or when it calls the stake, vote or
+  upgradeable-loader programs. It is also refused when it would take more native value (wallet +
+  wrapped) than the requested amount plus a 0.02 fee/rent allowance, take any other token
+  beyond the request, reassign the wallet, hand one of our token accounts to another owner, add a
+  delegate or close authority, or deliver less than the quoted minimum. Before this, a compromised
+  or spoofed API (`COOKIE_SWAP_API_URL`, `COOKIEBOX_AGG_API_URL`, `JUPITER_API_URL`,
+  `MOMOSWAP_API_URL`) could slip extra transfers into a build that simulated cleanly.
+  The check also refuses a build that writes to an account owned by one of those programs, which a
+  route program could reach by CPI without appearing in the instruction list.
+- **Swap quotes are held to the requested slippage.** A venue's `minOutAmount` below
+  `totalOut × (1 − slippage)` is refused before a transaction is built, so the venue cannot weaken
+  the delivery check by quoting a tiny minimum. Jupiter's priority fee is capped at 0.005 SOL in the
+  swap request, and the spend budget allows no more than that cap however much the response reports.
+- **`deploy_token` takes `maxCostCook`**, the most a launch may cost (creation fee + dev buy). Both
+  numbers come from the launchpad API, which also builds the transaction, so without it a creation
+  fee above 2,000 COOK is refused, and `devBuyPctOfTotalSupply` (priced off the API's curve)
+  requires it. The refusal happens before the dev buy is wrapped or the logo pinned.
+- `needs_signature.next` no longer calls the bytes "already verified". It says what was checked, and
+  that the user should still review the transaction in their wallet.
+
 # [0.6.0](https://github.com/cookiechain/cookie-mcp/releases/tag/v0.6.0)
 
 _September 23, 2026_

@@ -21,6 +21,11 @@ export interface RequestContext {
   wallet?: string;
   /** Message signatures supplied with the request, matched by exact message text. */
   providedSignatures?: ProvidedSignature[];
+  /**
+   * The request came from another machine (the HTTP transport sets this). Features that act on the
+   * server's own machine on the user's behalf — reading a local file — are refused.
+   */
+  remote?: boolean;
 }
 
 const store = new AsyncLocalStorage<RequestContext>();

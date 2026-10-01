@@ -1,7 +1,8 @@
 // trade — non-custodial swap through either aggregator: the aggregator quotes and builds the tx →
 // simulate on our RPC → sign locally → submit → confirm. Cookiebox submits via our own RPC;
 // Candy Shop submits/confirms via its own endpoints.
-import { VersionedTransaction, Transaction } from "@solana/web3.js";
+import { NATIVE_MINT } from "@solana/spl-token";
+import { PublicKey, VersionedTransaction, Transaction } from "@solana/web3.js";
 
 import {
   DEFAULT_SLIPPAGE_BPS,
@@ -33,12 +34,15 @@ import {
   requireSolanaMeta,
   assertSolanaAggregator,
   assertSolanaCookPair,
+  JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
 } from "./jupiter";
 import { getConnection, getSolanaConnection } from "./rpc";
 import { requireSigner } from "./wallet";
 import type { SignContext, TxSigner } from "./signer";
 import { rawToUi, uiToRaw } from "./format";
 import { noRouteError } from "./launchpad";
+import { assertQuotedMinimum, simulateWithinBudget, spendBudget } from "./spendGuard";
+import { fetchMintPrograms, mintProgramOf, netOfTransferFee } from "./transferFee";
 
 export type TokenMeta = MintMeta;
 
@@ -227,16 +231,30 @@ export async function trade(args: {
   const conn = getConnection();
   const tx = deserializeTx(transactionBase64);
 
+  // The aggregator built this transaction, so hold its simulated effect on our wallet to the request:
+  // at most `amount` of the input (plus fees) leaves, nothing else does, and at least the quoted
+  // minimum arrives. A Token-2022 output with a transfer fee arrives net of it.
+  const source = aggregator === "cookiebox" ? "Cookiebox aggregator" : "Candy Shop";
+  const minOut = assertQuotedMinimum(multiRoute, slippageBps, source);
+  const outRate =
+    args.outputMint === NATIVE_MINT.toBase58()
+      ? null
+      : mintProgramOf(
+          await fetchMintPrograms(conn, [new PublicKey(args.outputMint)]),
+          new PublicKey(args.outputMint),
+        ).transferFee;
+  const budget = spendBudget(args.inputMint, amountRaw, 0n, {
+    mint: args.outputMint,
+    min: netOfTransferFee(minOut, outRate),
+  });
+
   // replaceRecentBlockhash so a confirmed-RPC sim isn't rejected for a blockhash it doesn't yet know;
   // the tx we submit is unchanged.
-  const sim =
-    tx instanceof VersionedTransaction
-      ? await conn.simulateTransaction(tx, {
-          replaceRecentBlockhash: true,
-          sigVerify: false,
-          commitment: "confirmed",
-        })
-      : await conn.simulateTransaction(tx);
+  const sim = await simulateWithinBudget(conn, tx, signer.publicKey, budget, {
+    what: "swap",
+    source,
+    commitment: "confirmed",
+  });
   if (sim.value.err) {
     throw simErrorMessage(sim.value.err, sim.value.logs ?? null);
   }
@@ -396,10 +414,22 @@ async function tradeSolana(
 
   // Unlike the Cookie Chain path we do NOT replaceRecentBlockhash: Jupiter built the tx against a
   // real mainnet blockhash that this RPC knows, and the blockhash is what confirmation tracks.
-  const sim =
-    tx instanceof VersionedTransaction
-      ? await conn.simulateTransaction(tx, { sigVerify: false, commitment: "confirmed" })
-      : await conn.simulateTransaction(tx);
+  // Same effect check as on Cookie Chain. Jupiter's priority fee is on top of the fee allowance, but
+  // only up to the cap we asked for: the reported fee is the API's number, not a budget.
+  const priorityFee = Math.min(
+    Math.max(0, built.prioritizationFeeLamports ?? 0),
+    JUPITER_MAX_PRIORITY_FEE_LAMPORTS,
+  );
+  const budget = spendBudget(args.inputMint, amountRaw, BigInt(priorityFee), {
+    mint: args.outputMint,
+    min: assertQuotedMinimum(multiRoute, slippageBps, "Jupiter"),
+  });
+  const sim = await simulateWithinBudget(conn, tx, signer.publicKey, budget, {
+    what: "swap",
+    source: "Jupiter",
+    commitment: "confirmed",
+    replaceRecentBlockhash: false,
+  });
   if (sim.value.err) {
     throw simErrorMessage(sim.value.err, sim.value.logs ?? null, "solana");
   }

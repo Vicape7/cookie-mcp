@@ -5,7 +5,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { createServer } from "./createServer";
-import { serveHttp } from "./http";
+import { isLoopbackHost, resolveHttpSecurity, serveHttp } from "./http";
 import { ownPublicKey, signerMode } from "../core/wallet";
 import { VERSION } from "../version";
 
@@ -56,6 +56,8 @@ function parseArgs(argv: string[]): { http: boolean; port: number; host: string;
           "",
           "Env: COOKIE_PRIVATE_KEY (local signer), COOKIE_SIGNER=external (+ COOKIE_WALLET_ADDRESS or",
           "the x-cookie-wallet request header), COOKIE_RPC_URL, COOKIE_MCP_HTTP_PORT/HOST/PATH.",
+          "HTTP gates: COOKIE_MCP_HTTP_TOKEN (bearer token), COOKIE_MCP_ALLOWED_HOSTS (Host allow-list),",
+          "COOKIE_MCP_CORS_ORIGIN (browser origins allowed; default * without a key, none with one).",
         ].join("\n"),
       );
       process.exit(0);
@@ -70,21 +72,42 @@ function parseArgs(argv: string[]): { http: boolean; port: number; host: string;
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.http) {
-    // A hosted server that also holds a spending key would let anyone who reaches the port spend from
-    // it. Refuse unless the operator says they mean it.
+    const sec = resolveHttpSecurity(opts);
+    // A hosted server that also holds a spending key lets anyone who reaches the port spend from it —
+    // and "reaches" includes any web page open in a browser on this machine, so a loopback bind does
+    // not make it private. Refuse unless the operator opts in AND every request must carry a token.
     if (signerMode() === "local" && process.env.COOKIE_PRIVATE_KEY?.trim()) {
       if (process.env.COOKIE_HTTP_ALLOW_LOCAL_KEY !== "1") {
         throw new Error(
           "refusing to serve HTTP with a local COOKIE_PRIVATE_KEY: every caller could spend from it. " +
-            "Use COOKIE_SIGNER=external (wallet-signed, no key in the process), or set " +
-            "COOKIE_HTTP_ALLOW_LOCAL_KEY=1 if this server is private and you accept that.",
+            "Use COOKIE_SIGNER=external (wallet-signed, no key in the process), or set both " +
+            "COOKIE_HTTP_ALLOW_LOCAL_KEY=1 and COOKIE_MCP_HTTP_TOKEN if you accept that risk.",
+        );
+      }
+      if (!sec.token) {
+        throw new Error(
+          "refusing to serve HTTP with a local COOKIE_PRIVATE_KEY and no COOKIE_MCP_HTTP_TOKEN: a " +
+            "loopback bind is reachable from any web page in your browser. Set COOKIE_MCP_HTTP_TOKEN " +
+            "to a long random secret and send it as `Authorization: Bearer <token>`.",
         );
       }
       console.error(
-        "WARNING: serving HTTP with a local spending key (COOKIE_HTTP_ALLOW_LOCAL_KEY=1)",
+        "WARNING: serving HTTP with a local spending key (COOKIE_HTTP_ALLOW_LOCAL_KEY=1); every " +
+          "request needs the bearer token",
       );
     }
-    const url = await serveHttp(createServer, opts);
+    if (!sec.allowedHosts && !isLoopbackHost(opts.host)) {
+      console.error(
+        `WARNING: bound to ${opts.host} with no Host allow-list — set COOKIE_MCP_ALLOWED_HOSTS to ` +
+          "the hostname(s) clients use, so DNS-rebinding pages are refused",
+      );
+    }
+    if (!sec.token) {
+      console.error(
+        "note: no COOKIE_MCP_HTTP_TOKEN set — anyone who can reach this port can call every tool",
+      );
+    }
+    const url = await serveHttp(createServer, opts, sec);
     console.error(`cookie-mcp ${VERSION} serving Streamable HTTP at ${url} — ${modeLine()}`);
     return;
   }

@@ -6,10 +6,18 @@
 //
 // The MIME type comes from magic bytes, never the extension: the launchpad stores whatever we
 // declare, and a `.png` that is really a JPEG would be pinned with the wrong content type.
+//
+// This reads the disk of the machine the SERVER runs on, so it is a local-user feature only:
+// refused outright over HTTP and with an external signer (the caller is not the machine's owner), and
+// on stdio confined to one directory tree with no hidden segments, so a steered agent cannot pin
+// `~/.ssh/…` or a screenshot folder elsewhere on disk. Failures that would tell a caller whether
+// some path exists all read the same and never echo the resolved path.
 import fs from "node:fs";
 import path from "node:path";
 
+import { requestContext } from "./context";
 import { CookieMcpError } from "./errors";
+import { signerMode } from "./wallet";
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -40,10 +48,58 @@ const SIGNATURES: { mimeType: string; matches: (b: Buffer) => boolean }[] = [
  */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Refuse local file reads when the caller is not the person whose machine this is: any request that
+ * came in over HTTP, and external-signer mode (a hosted setup by definition). Checked before any
+ * network call, so a remote caller learns nothing about the disk.
+ */
+export function assertLocalFilesAllowed(): void {
+  if (requestContext()?.remote || signerMode() === "external") {
+    throw new CookieMcpError(
+      "imagePath is disabled on a hosted server — it would read the server's disk, not yours",
+      "send the logo as imageBase64 (with imageMimeType), or as an https imageUrl",
+    );
+  }
+}
+
+/**
+ * The directory tree `imagePath` may read from: `COOKIE_IMAGE_DIR` when set, else the user's home.
+ * Returned as a real path, so a symlinked root compares correctly against a real file path.
+ */
+export function imageRoot(): string {
+  // No cwd fallback: a server started from `/` with a stripped env would otherwise confine to `/`.
+  const root = process.env.COOKIE_IMAGE_DIR?.trim() || process.env.HOME?.trim();
+  if (!root) {
+    throw new CookieMcpError(
+      "no directory for imagePath to read from (COOKIE_IMAGE_DIR and HOME are both unset)",
+      "set COOKIE_IMAGE_DIR to the folder holding the logo, or use imageBase64 / imageUrl",
+    );
+  }
+  try {
+    // `resolveImagePath` expands `~`, which MCP client configs cannot (no shell).
+    return fs.realpathSync(resolveImagePath(root));
+  } catch {
+    throw new CookieMcpError(
+      "the directory imagePath reads from does not exist",
+      "set COOKIE_IMAGE_DIR to an existing folder holding the logo, or use imageBase64 / imageUrl",
+    );
+  }
+}
+
+/**
+ * True when `real` (already symlink-resolved) sits inside `root` and no segment below the root is
+ * hidden (`.ssh`, `.config`, `.env.png`, …). Pure.
+ */
+export function isAllowedImagePath(real: string, root: string): boolean {
+  const rel = path.relative(root, real);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  return rel.split(path.sep).every((seg) => seg !== "" && !seg.startsWith("."));
+}
+
 /** `~/x.png` and relative paths resolve the way the shell would. */
 export function resolveImagePath(input: string): string {
   const s = input.trim();
-  if (s.startsWith("~")) return path.join(process.env.HOME ?? "", s.slice(1));
+  if (s === "~" || s.startsWith("~/")) return path.join(process.env.HOME ?? "", s.slice(1));
   return path.isAbsolute(s) ? s : path.resolve(process.cwd(), s);
 }
 
@@ -57,44 +113,47 @@ export function sniffImageMimeType(bytes: Buffer): string | null {
  * caller can surface verbatim — this runs before any spend, so every failure here is free.
  */
 export function readImageFile(input: string): { base64: string; mimeType: string; bytes: number } {
-  const abs = resolveImagePath(input);
+  assertLocalFilesAllowed();
+  const root = imageRoot();
+  // One message for missing, unreadable, a directory, a symlink out of the root and a hidden path:
+  // which of those it was is exactly what a filesystem probe wants to learn.
+  const unusable = () =>
+    new CookieMcpError(
+      `cannot use "${input.trim()}" as a logo: not a readable image file under the image directory`,
+      `imagePath must name a PNG/JPEG/GIF/WebP file inside ${process.env.COOKIE_IMAGE_DIR?.trim() ? "COOKIE_IMAGE_DIR" : "your home directory"}, ` +
+        "with no hidden folder in the path; set COOKIE_IMAGE_DIR to read from elsewhere, or use " +
+        "imageBase64 / imageUrl",
+    );
 
+  let real: string;
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    real = fs.realpathSync(resolveImagePath(input));
+    stat = fs.statSync(real);
   } catch {
-    throw new CookieMcpError(
-      `no such file: ${abs}`,
-      "pass the full path to the image on this machine, or use imageUrl for a hosted one",
-    );
+    throw unusable();
   }
-  if (stat.isDirectory()) {
-    throw new CookieMcpError(`${abs} is a directory, not an image file`);
-  }
-  if (stat.size === 0) {
-    throw new CookieMcpError(`${abs} is empty`);
+  if (!isAllowedImagePath(real, root) || !stat.isFile() || stat.size === 0) {
+    throw unusable();
   }
   if (stat.size > MAX_IMAGE_BYTES) {
     throw new CookieMcpError(
-      `${abs} is ${(stat.size / 1024 / 1024).toFixed(1)} MB — the limit is ${MAX_IMAGE_BYTES / 1024 / 1024} MB`,
+      `the logo file is ${(stat.size / 1024 / 1024).toFixed(1)} MB — the limit is ${MAX_IMAGE_BYTES / 1024 / 1024} MB`,
       "resize it first; a launchpad logo renders at a few hundred pixels",
     );
   }
 
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(abs);
-  } catch (e) {
-    throw new CookieMcpError(
-      `cannot read ${abs}: ${e instanceof Error ? e.message : String(e)}`,
-      "check the file's permissions",
-    );
+    buf = fs.readFileSync(real);
+  } catch {
+    throw unusable();
   }
 
   const mimeType = sniffImageMimeType(buf);
   if (!mimeType) {
     throw new CookieMcpError(
-      `${abs} is not a PNG, JPEG, GIF or WebP image`,
+      "the logo file is not a PNG, JPEG, GIF or WebP image",
       "the format is read from the file's own bytes, not its extension — convert it first",
     );
   }
